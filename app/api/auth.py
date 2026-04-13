@@ -93,18 +93,20 @@ async def kakao_callback(code: str, db: Session = Depends(get_db)):
 
 @router.post("/send-code")
 async def send_verify_code(req: PhoneLoginRequest):
-    """SMS 인증번호 발송 (솔라피)"""
-    code = "".join(random.choices(string.digits, k=4))
+
+code = "1234"
     _verify_codes[req.phone.replace("-", "")] = code
 
-    # 솔라피로 SMS 발송
-    result = await send_sms(
-        to=req.phone,
-        text=f"[FC 동호회] 인증번호: {code} (3분 내 입력)",
-    )
+    # 솔라피 연동 후 아래 주석 해제
+    # code = "".join(random.choices(string.digits, k=4))
+    # _verify_codes[req.phone.replace("-", "")] = code
+    # result = await send_sms(
+    #     to=req.phone,
+    #     text=f"[FC 동호회] 인증번호: {code} (3분 내 입력)",
+    # )
+    # return {"message": "인증번호가 발송되었습니다.", "result": result}
 
-    return {"message": "인증번호가 발송되었습니다.", "result": result}
-
+    return {"message": "인증번호는 1234 입니다.", "code": code}
 
 @router.post("/register", response_model=TokenResponse)
 async def register(req: RegisterRequest, db: Session = Depends(get_db)):
