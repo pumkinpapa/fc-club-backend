@@ -21,7 +21,6 @@ from app.schemas import (
     TokenResponse, MemberResponse,
 )
 from app.services.kakao_service import get_kakao_login_url, get_kakao_token, get_kakao_user_info
-from app.services.solapi_service import send_sms
 
 router = APIRouter(prefix="/api/auth", tags=["인증"])
 
@@ -37,31 +36,20 @@ async def kakao_login_url():
 
 @router.get("/kakao/callback")
 async def kakao_callback(code: str, db: Session = Depends(get_db)):
-    """
-    카카오 로그인 콜백
-
-    1. 인증 코드로 토큰 발급
-    2. 사용자 정보 조회
-    3. 회원 조회 또는 자동 가입
-    4. JWT 토큰 발급
-    """
-    # 토큰 발급
+    """카카오 로그인 콜백"""
     token_data = await get_kakao_token(code)
     access_token = token_data.get("access_token")
     if not access_token:
         raise HTTPException(status_code=400, detail="카카오 토큰 발급 실패")
 
-    # 사용자 정보 조회
     user_info = await get_kakao_user_info(access_token)
     kakao_id = user_info.get("id")
     if not kakao_id:
         raise HTTPException(status_code=400, detail="카카오 사용자 정보 조회 실패")
 
-    # 기존 회원 조회
     member = db.query(Member).filter(Member.kakao_id == kakao_id).first()
 
     if not member:
-        # 전화번호로 기존 회원 매칭 시도
         phone = user_info.get("phone", "")
         if phone:
             member = db.query(Member).filter(Member.phone == phone).first()
@@ -70,7 +58,6 @@ async def kakao_callback(code: str, db: Session = Depends(get_db)):
                 db.commit()
 
     if not member:
-        # 신규 회원 자동 가입
         member = Member(
             name=user_info.get("name", "새회원"),
             birth=user_info.get("birthday", ""),
@@ -83,7 +70,6 @@ async def kakao_callback(code: str, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(member)
 
-    # JWT 토큰 발급
     jwt_token = create_access_token({"sub": str(member.id)})
     return TokenResponse(
         access_token=jwt_token,
@@ -93,11 +79,13 @@ async def kakao_callback(code: str, db: Session = Depends(get_db)):
 
 @router.post("/send-code")
 async def send_verify_code(req: PhoneLoginRequest):
-
-code = "1234"
+    """SMS 인증번호 발송"""
+    # 고정 인증번호 사용 (솔라피 연동 후 아래 주석 해제)
+    code = "1234"
     _verify_codes[req.phone.replace("-", "")] = code
 
-    # 솔라피 연동 후 아래 주석 해제
+    # ── 솔라피 연동 후 아래 주석 해제 ──
+    # from app.services.solapi_service import send_sms
     # code = "".join(random.choices(string.digits, k=4))
     # _verify_codes[req.phone.replace("-", "")] = code
     # result = await send_sms(
@@ -108,29 +96,20 @@ code = "1234"
 
     return {"message": "인증번호는 1234 입니다.", "code": code}
 
+
 @router.post("/register", response_model=TokenResponse)
 async def register(req: RegisterRequest, db: Session = Depends(get_db)):
-    """
-    회원가입
-
-    1. 인증번호 확인
-    2. 중복 체크
-    3. 회원 생성
-    4. JWT 토큰 발급
-    """
+    """회원가입"""
     phone_clean = req.phone.replace("-", "")
 
-    # 인증번호 확인
     stored_code = _verify_codes.get(phone_clean)
     if not stored_code or stored_code != req.verify_code:
         raise HTTPException(status_code=400, detail="인증번호가 올바르지 않습니다.")
 
-    # 중복 체크
     existing = db.query(Member).filter(Member.phone == phone_clean).first()
     if existing:
         raise HTTPException(status_code=409, detail="이미 등록된 전화번호입니다.")
 
-    # 회원 생성
     member = Member(
         name=req.name,
         birth=req.birth,
@@ -142,10 +121,8 @@ async def register(req: RegisterRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(member)
 
-    # 인증번호 삭제
     _verify_codes.pop(phone_clean, None)
 
-    # JWT 토큰 발급
     jwt_token = create_access_token({"sub": str(member.id)})
     return TokenResponse(
         access_token=jwt_token,
