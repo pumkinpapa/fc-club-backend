@@ -448,3 +448,126 @@ async def send_vote_notification_manual(
     from app.services.scheduler import send_vote_notifications
     await send_vote_notifications()
     return {"message": "투표 알림톡이 발송되었습니다."}
+
+
+# ══════════════════════════════════════════════
+# ★★★ DB 마이그레이션 (시스템관리자) ★★★
+# ══════════════════════════════════════════════
+
+class MigrateRequest(BaseModel):
+    target_url: str
+    wipe_target: bool = False  # True면 대상 DB의 기존 데이터 모두 삭제 후 이전
+
+
+@router.post("/migrate-to-new-db")
+async def migrate_to_new_db(
+    req: MigrateRequest,
+    db: Session = Depends(get_db),
+    sys_admin: Member = Depends(get_system_admin_user),
+):
+    """
+    현재 DB의 모든 데이터를 다른 PostgreSQL DB로 복사 (시스템관리자 전용)
+
+    - target_url: 대상 DB의 PostgreSQL connection string (예: Neon URL)
+    - wipe_target: True면 대상 DB의 기존 데이터 삭제 후 이전
+    - 현재 DB는 변경되지 않음 (읽기만 함)
+    - 이전 후 Render 대시보드에서 DATABASE_URL을 target_url로 변경해야 함
+    """
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+
+    target_url = req.target_url.strip()
+    # postgres:// → postgresql:// (SQLAlchemy 요구사항)
+    if target_url.startswith("postgres://"):
+        target_url = "postgresql://" + target_url[len("postgres://"):]
+    if not target_url.startswith("postgresql://"):
+        raise HTTPException(
+            status_code=400,
+            detail="올바른 PostgreSQL URL이 아닙니다. (postgresql:// 또는 postgres://로 시작해야 함)"
+        )
+
+    # 현재 DB 데이터 모두 읽기
+    members = db.query(Member).all()
+    matches = db.query(Match).all()
+    records = db.query(MatchRecord).all()
+
+    # 모델 객체를 dict로 변환 (세션 분리 후에도 접근 가능하도록)
+    def to_dict(obj):
+        return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
+
+    members_data = [to_dict(m) for m in members]
+    matches_data = [to_dict(m) for m in matches]
+    records_data = [to_dict(r) for r in records]
+
+    # 대상 DB 연결 및 테이블 생성
+    try:
+        target_engine = create_engine(target_url, pool_pre_ping=True)
+        # Member.metadata는 모든 테이블 메타데이터 포함
+        Member.metadata.create_all(bind=target_engine)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"대상 DB 연결 실패: {str(e)[:200]}"
+        )
+
+    TargetSession = sessionmaker(bind=target_engine, autocommit=False, autoflush=False)
+    target_db = TargetSession()
+
+    try:
+        # 기존 데이터 확인
+        existing_members = target_db.query(Member).count()
+        existing_matches = target_db.query(Match).count()
+        existing_records = target_db.query(MatchRecord).count()
+        existing_total = existing_members + existing_matches + existing_records
+
+        if existing_total > 0:
+            if not req.wipe_target:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"대상 DB에 이미 데이터가 있습니다 (회원 {existing_members}, 경기 {existing_matches}, 기록 {existing_records}). wipe_target=true로 다시 시도하세요."
+                )
+            # 기존 데이터 삭제
+            target_db.query(MatchRecord).delete()
+            target_db.query(Match).delete()
+            target_db.query(Member).delete()
+            target_db.commit()
+
+        # 데이터 복사 (ID 보존)
+        for m in members_data:
+            target_db.add(Member(**m))
+        target_db.commit()
+
+        for m in matches_data:
+            target_db.add(Match(**m))
+        target_db.commit()
+
+        for r in records_data:
+            target_db.add(MatchRecord(**r))
+        target_db.commit()
+
+        # Auto-increment 시퀀스 재설정 (다음 INSERT 시 충돌 방지)
+        for cls in [Member, Match, MatchRecord]:
+            tbl = cls.__tablename__
+            target_db.execute(text(
+                f"SELECT setval(pg_get_serial_sequence('{tbl}', 'id'), "
+                f"COALESCE((SELECT MAX(id) FROM {tbl}), 1), "
+                f"(SELECT MAX(id) FROM {tbl}) IS NOT NULL);"
+            ))
+        target_db.commit()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        target_db.rollback()
+        raise HTTPException(status_code=500, detail=f"이전 실패: {str(e)[:300]}")
+    finally:
+        target_db.close()
+        target_engine.dispose()
+
+    return {
+        "message": "데이터 이전이 완료되었습니다.",
+        "members": len(members_data),
+        "matches": len(matches_data),
+        "match_records": len(records_data),
+        "next_step": "Render 대시보드에서 DATABASE_URL을 새 URL로 변경하고 저장하세요.",
+    }
