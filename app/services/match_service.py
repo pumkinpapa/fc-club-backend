@@ -56,6 +56,43 @@ def vote(db: Session, match_id: int, member_id: int, attendance: str) -> MatchRe
     return record
 
 
+def set_vote_for_member(
+    db: Session, match_id: int, member_id: int, attendance: str
+) -> Optional[MatchRecord]:
+    """
+    특정 회원의 투표 상태를 대신 변경 (시스템관리자 전용)
+
+    - attendance가 "참석" 또는 "불참"이면 vote() 호출
+    - attendance가 "미응답" 또는 "" 이면 MatchRecord 삭제 (투표 안 한 상태로 복귀)
+    - 편성완료 이후에는 팀/결과가 있을 수 있으므로, "미응답"으로 되돌릴 때는 그 필드들도 초기화됨
+    """
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise ValueError("경기를 찾을 수 없습니다.")
+    if match.status == "확정완료":
+        raise ValueError("확정완료된 경기는 투표를 변경할 수 없습니다.")
+
+    member = db.query(Member).filter(Member.id == member_id).first()
+    if not member:
+        raise ValueError("회원을 찾을 수 없습니다.")
+    if member.status != "승인":
+        raise ValueError("승인된 회원만 투표 대상입니다.")
+
+    if attendance in ("미응답", "", None):
+        # MatchRecord 삭제
+        db.query(MatchRecord).filter(
+            MatchRecord.match_id == match_id,
+            MatchRecord.member_id == member_id,
+        ).delete(synchronize_session=False)
+        db.commit()
+        return None
+
+    if attendance not in ("참석", "불참"):
+        raise ValueError("참석, 불참, 미응답 중 하나여야 합니다.")
+
+    return vote(db, match_id, member_id, attendance)
+
+
 def get_vote_status(db: Session, match: Match) -> dict:
     """투표 현황 조회 (승인된 회원만 대상)"""
     records = db.query(MatchRecord).filter(MatchRecord.match_id == match.id).all()
