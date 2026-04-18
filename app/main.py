@@ -1,9 +1,3 @@
-"""
-FC 동호회 - 축구 동호회 운영 관리 백엔드
-
-FastAPI 앱 진입점
-"""
-
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -20,7 +14,6 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """앱 시작/종료 시 실행"""
     init_db()
     db = SessionLocal()
     try:
@@ -28,18 +21,11 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
     start_scheduler()
-    print(f"  {settings.app_name} 서버 시작!")
     yield
     stop_scheduler()
-    print(f"  {settings.app_name} 서버 종료")
 
 
-app = FastAPI(
-    title=f"{settings.app_name} API",
-    description="축구 동호회 운영 관리 백엔드 서버",
-    version="2.0.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="FC Club API", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,13 +43,4 @@ app.include_router(rankings.router)
 
 @app.get("/")
 async def root():
-    return {
-        "name": settings.app_name,
-        "version": "2.0.0",
-        "docs": "/docs",
-    }
-
-
-@app.get("/health")
-async def health_check():
-    return {"status": "ok"}
+    return {"name": "FC Club", "status": "ok"}
