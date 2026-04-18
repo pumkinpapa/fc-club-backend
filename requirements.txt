@@ -8,3 +8,4 @@ PyJWT
 httpx
 apscheduler
 python-multipart
+psycopg2-binary
