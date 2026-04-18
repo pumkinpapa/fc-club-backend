@@ -47,7 +47,7 @@ def get_current_user(
     db: Session = Depends(get_db),
 ):
     """현재 로그인 사용자를 반환하는 Dependency"""
-    from app.models.models import Member
+    from app.models import Member
 
     payload = verify_token(credentials.credentials)
     member_id = payload.get("sub")
