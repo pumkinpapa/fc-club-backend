@@ -21,9 +21,9 @@ from app.schemas import (
 from app.services.match_service import (
     get_next_match_date, get_or_create_match, vote,
     get_vote_status, assign_teams_and_duties, record_result,
-    # ★ 신규 함수
     update_teams, update_duties, update_result_members,
     confirm_result, cancel_confirm, cancel_assignment,
+    delete_match,  # ★ 신규
 )
 from app.services.solapi_service import send_alimtalk_bulk
 
@@ -32,10 +32,7 @@ settings = get_settings()
 router = APIRouter(prefix="/api/matches", tags=["경기관리"])
 
 
-# ══════════════════════════════════════════════
-# 시스템관리자 권한 검증 (전화번호 기반)
-# ══════════════════════════════════════════════
-# 프론트엔드와 동일하게 특정 전화번호를 시스템관리자로 식별
+# 시스템관리자 전화번호
 SYS_ADMIN_PHONE = "01000000001"
 
 
@@ -56,7 +53,6 @@ async def list_matches(
     current_user: Member = Depends(get_current_user),
     limit: int = Query(20, ge=1, le=100),
 ):
-    """경기 목록 조회 (최신순)"""
     matches = (
         db.query(Match)
         .order_by(Match.match_date.desc())
@@ -71,7 +67,6 @@ async def get_next_match(
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
-    """다음 경기 정보 조회 (없으면 자동 생성)"""
     match_date = get_next_match_date(settings.match_day_of_week)
     match = get_or_create_match(db, match_date)
     return MatchResponse.model_validate(match)
@@ -83,7 +78,6 @@ async def get_match(
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
-    """경기 상세 조회"""
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
@@ -101,7 +95,6 @@ async def submit_vote(
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
-    """참석여부 투표"""
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
@@ -122,7 +115,6 @@ async def get_votes(
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
-    """투표 현황 조회"""
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
@@ -168,7 +160,6 @@ async def assign_teams(
     db: Session = Depends(get_db),
     admin: Member = Depends(get_admin_user),
 ):
-    """팀 편성 및 역할 배정 (관리자 전용)"""
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
@@ -191,7 +182,6 @@ async def notify_teams(
     db: Session = Depends(get_db),
     admin: Member = Depends(get_admin_user),
 ):
-    """편성 결과 알림톡 발송 (관리자 전용)"""
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
@@ -238,7 +228,6 @@ async def submit_result(
     db: Session = Depends(get_db),
     admin: Member = Depends(get_admin_user),
 ):
-    """경기 결과 입력 (관리자 전용)"""
     try:
         match = record_result(db, match_id, req.winning_team)
     except ValueError as e:
@@ -256,7 +245,6 @@ async def get_match_records(
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
-    """경기 참여 기록 조회"""
     records = db.query(MatchRecord).filter(MatchRecord.match_id == match_id).all()
 
     result = []
@@ -277,7 +265,7 @@ async def get_match_records(
 
 
 # ══════════════════════════════════════════════
-# ★★★ 신규: 팀/담당자/결과 수정 API ★★★
+# 팀/담당자/결과 수정 API
 # ══════════════════════════════════════════════
 
 class TeamAssignmentItem(BaseModel):
@@ -291,7 +279,7 @@ class TeamUpdateRequest(BaseModel):
 
 class DutyItem(BaseModel):
     member_id: int
-    duty: str  # "" | "골대" | "음료" | "음료, 골대"
+    duty: str
 
 
 class DutyUpdateRequest(BaseModel):
@@ -310,7 +298,6 @@ async def update_match_teams(
     db: Session = Depends(get_db),
     admin: Member = Depends(get_admin_user),
 ):
-    """팀 편성 저장 (관리자 전용) — 편성완료 이후 드래그 수정된 결과 반영"""
     try:
         match = update_teams(
             db, match_id, [a.model_dump() for a in req.assignments]
@@ -318,10 +305,7 @@ async def update_match_teams(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    return {
-        "message": "팀 편성이 저장되었습니다.",
-        "match": MatchResponse.model_validate(match),
-    }
+    return {"message": "팀 편성이 저장되었습니다.", "match": MatchResponse.model_validate(match)}
 
 
 @router.put("/{match_id}/duties")
@@ -331,12 +315,10 @@ async def update_match_duties(
     db: Session = Depends(get_db),
     sys_admin: Member = Depends(get_system_admin_user),
 ):
-    """담당자(골대/음료) 변경 (시스템관리자 전용, 확정 전)"""
     try:
         update_duties(db, match_id, [d.model_dump() for d in req.duties])
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
     return {"message": "담당자가 저장되었습니다."}
 
 
@@ -347,14 +329,6 @@ async def update_match_result_members(
     db: Session = Depends(get_db),
     admin: Member = Depends(get_admin_user),
 ):
-    """
-    결과 명단 수정 (관리자 전용, 확정완료 전)
-
-    - additions: 추가/이동할 멤버 [{member_id, team}]
-    - removals: 결과에서 제외할 멤버 ID 리스트 (불참 처리)
-    - 승/무/패는 match.result_summary 기준으로 자동 계산
-    - 랭킹은 MatchRecord 기반 실시간 집계이므로 별도 재계산 불필요
-    """
     try:
         update_result_members(
             db, match_id,
@@ -363,7 +337,6 @@ async def update_match_result_members(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
     return {"message": "결과가 수정되었습니다."}
 
 
@@ -373,14 +346,14 @@ async def confirm_match_result(
     db: Session = Depends(get_db),
     admin: Member = Depends(get_admin_user),
 ):
-    """경기결과 확정 (관리자 전용) — 경기완료 → 확정완료"""
+    """경기결과 확정 (관리자 전용). 확정 즉시 다음 주 경기 자동 생성 → 투표 시작."""
     try:
         match = confirm_result(db, match_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     return {
-        "message": "경기 결과가 확정되었습니다.",
+        "message": "경기 결과가 확정되었습니다. 다음 주 경기 투표가 시작되었습니다.",
         "match": MatchResponse.model_validate(match),
     }
 
@@ -391,16 +364,11 @@ async def cancel_match_confirm(
     db: Session = Depends(get_db),
     sys_admin: Member = Depends(get_system_admin_user),
 ):
-    """확정 취소 (시스템관리자 전용) — 확정완료 → 경기완료"""
     try:
         match = cancel_confirm(db, match_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-    return {
-        "message": "확정이 취소되었습니다.",
-        "match": MatchResponse.model_validate(match),
-    }
+    return {"message": "확정이 취소되었습니다.", "match": MatchResponse.model_validate(match)}
 
 
 @router.post("/{match_id}/cancel-assign")
@@ -409,16 +377,35 @@ async def cancel_match_assignment(
     db: Session = Depends(get_db),
     sys_admin: Member = Depends(get_system_admin_user),
 ):
-    """편성 취소 (시스템관리자 전용) — 팀/담당자/결과 모두 초기화"""
     try:
         match = cancel_assignment(db, match_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    return {"message": "편성이 취소되었습니다.", "match": MatchResponse.model_validate(match)}
 
-    return {
-        "message": "편성이 취소되었습니다.",
-        "match": MatchResponse.model_validate(match),
-    }
+
+# ══════════════════════════════════════════════
+# ★★★ 신규: 경기 완전 삭제 (시스템관리자) ★★★
+# ══════════════════════════════════════════════
+
+@router.delete("/{match_id}")
+async def delete_match_endpoint(
+    match_id: int,
+    db: Session = Depends(get_db),
+    sys_admin: Member = Depends(get_system_admin_user),
+):
+    """
+    경기 완전 삭제 (시스템관리자 전용)
+
+    - 해당 경기의 Match 레코드 삭제
+    - 관련 MatchRecord(투표/팀/결과) 모두 삭제
+    - 다음 /api/matches/next 조회 시 새 빈 경기 자동 생성
+    """
+    try:
+        delete_match(db, match_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"message": "경기가 삭제되었습니다."}
 
 
 # ──────────────────────────────────
