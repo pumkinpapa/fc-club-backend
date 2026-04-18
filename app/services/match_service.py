@@ -57,9 +57,10 @@ def vote(db: Session, match_id: int, member_id: int, attendance: str) -> MatchRe
 
 
 def get_vote_status(db: Session, match: Match) -> dict:
-    """투표 현황 조회"""
+    """투표 현황 조회 (승인된 회원만 대상)"""
     records = db.query(MatchRecord).filter(MatchRecord.match_id == match.id).all()
-    all_members = db.query(Member).all()
+    # ★ status="승인"인 회원만 대상 (대기/거절 회원은 투표 집계에서 제외)
+    all_members = db.query(Member).filter(Member.status == "승인").all()
 
     voted_member_ids = {r.member_id for r in records}
 
