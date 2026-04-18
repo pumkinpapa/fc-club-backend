@@ -11,9 +11,26 @@ from app.core.database import get_db
 from app.core.security import get_current_user, get_admin_user
 from app.models import Member
 from app.schemas import MemberResponse, MemberUpdate
+# ★ 신규: 시스템관리자 권한 + cascade 삭제 서비스
+from app.services.match_service import delete_member_cascade
 
 router = APIRouter(prefix="/api/members", tags=["회원관리"])
 
+
+# 시스템관리자 전화번호 (matches.py와 동일하게 유지)
+SYS_ADMIN_PHONE = "01000000001"
+
+
+def get_system_admin_user(current_user: Member = Depends(get_current_user)) -> Member:
+    """시스템관리자 권한 확인"""
+    if current_user.phone != SYS_ADMIN_PHONE:
+        raise HTTPException(status_code=403, detail="시스템관리자만 수행 가능합니다.")
+    return current_user
+
+
+# ──────────────────────────────────
+# 회원 조회
+# ──────────────────────────────────
 
 @router.get("/", response_model=List[MemberResponse])
 async def list_members(
@@ -97,15 +114,26 @@ async def update_member(
     return MemberResponse.model_validate(member)
 
 
+# ══════════════════════════════════════════════
+# ★★★ 수정: 회원 삭제 - 시스템관리자 전용 + cascade ★★★
+# ══════════════════════════════════════════════
+
 @router.delete("/{member_id}")
 async def delete_member(
     member_id: int,
     db: Session = Depends(get_db),
-    admin: Member = Depends(get_admin_user),
+    sys_admin: Member = Depends(get_system_admin_user),  # ★ 시스템관리자로 변경
 ):
-    member = db.query(Member).filter(Member.id == member_id).first()
-    if not member:
-        raise HTTPException(status_code=404, detail="회원을 찾을 수 없습니다.")
-    db.delete(member)
-    db.commit()
-    return {"message": f"{member.name}님이 삭제되었습니다."}
+    """
+    회원 완전 삭제 (시스템관리자 전용)
+
+    - 회원의 모든 MatchRecord(투표/팀/결과) 삭제
+    - Member 레코드 삭제
+    - 시스템관리자 자신은 삭제 불가
+    - 삭제와 동시에 랭킹에서 제거됨 (실시간 집계)
+    """
+    try:
+        name = delete_member_cascade(db, member_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"message": f"{name}님이 삭제되었습니다."}
