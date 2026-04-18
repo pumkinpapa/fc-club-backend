@@ -23,7 +23,8 @@ from app.services.match_service import (
     get_vote_status, assign_teams_and_duties, record_result,
     update_teams, update_duties, update_result_members,
     confirm_result, cancel_confirm, cancel_assignment,
-    delete_match,  # ★ 신규
+    delete_match,
+    set_vote_for_member,  # ★ 신규
 )
 from app.services.solapi_service import send_alimtalk_bulk
 
@@ -396,16 +397,42 @@ async def delete_match_endpoint(
 ):
     """
     경기 완전 삭제 (시스템관리자 전용)
-
-    - 해당 경기의 Match 레코드 삭제
-    - 관련 MatchRecord(투표/팀/결과) 모두 삭제
-    - 다음 /api/matches/next 조회 시 새 빈 경기 자동 생성
     """
     try:
         delete_match(db, match_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"message": "경기가 삭제되었습니다."}
+
+
+# ══════════════════════════════════════════════
+# ★★★ 신규: 시스템관리자의 대리 투표 변경 ★★★
+# ══════════════════════════════════════════════
+
+class SetVoteRequest(BaseModel):
+    member_id: int
+    attendance: str  # "참석" | "불참" | "미응답"
+
+
+@router.put("/{match_id}/set-vote")
+async def set_vote_endpoint(
+    match_id: int,
+    req: SetVoteRequest,
+    db: Session = Depends(get_db),
+    sys_admin: Member = Depends(get_system_admin_user),
+):
+    """
+    시스템관리자가 특정 회원의 투표 상태를 대신 변경 (드래그앤드롭 UI용)
+
+    - attendance: "참석" / "불참" / "미응답"
+    - "미응답"이면 MatchRecord 삭제 (투표 초기화)
+    - 확정완료된 경기는 변경 불가
+    """
+    try:
+        set_vote_for_member(db, match_id, req.member_id, req.attendance)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"message": f"투표가 '{req.attendance}'(으)로 변경되었습니다."}
 
 
 # ──────────────────────────────────
