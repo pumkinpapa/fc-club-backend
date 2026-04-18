@@ -12,7 +12,7 @@ from app.models import Match, MatchRecord, Member
 
 
 # ──────────────────────────────────────────────
-# 기존 함수들 (변경 없음)
+# 기존 함수들
 # ──────────────────────────────────────────────
 
 def get_next_match_date(match_day: int = 6) -> date:
@@ -135,16 +135,11 @@ def assign_teams_and_duties(db: Session, match_id: int) -> dict:
 def record_result(db: Session, match_id: int, winning_team: str) -> Match:
     """
     경기 결과 기록
-
-    - winning_team이 "무승부"이면 모두 무승부 처리
-    - 그 외에는 해당 팀 승리, 나머지 패배
-    - 상태를 "경기완료"로 변경 (아직 "확정완료"는 아님)
     """
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise ValueError("경기를 찾을 수 없습니다.")
 
-    # 확정완료된 경기는 수정 불가
     if match.status == "확정완료":
         raise ValueError("확정완료된 경기는 결과를 변경할 수 없습니다.")
 
@@ -173,11 +168,7 @@ def record_result(db: Session, match_id: int, winning_team: str) -> Match:
 
 
 def get_rankings(db: Session) -> list[dict]:
-    """
-    누적 승점 랭킹 계산 (MatchRecord에서 실시간 집계)
-
-    승: 3점, 무: 1점, 패: 0점
-    """
+    """누적 승점 랭킹 계산 (MatchRecord에서 실시간 집계)"""
     members = db.query(Member).all()
     stats = {}
 
@@ -223,25 +214,17 @@ def get_rankings(db: Session) -> list[dict]:
 
 
 # ══════════════════════════════════════════════
-# ★★★ 신규 추가 함수 (2026.04 추가) ★★★
+# 팀/담당자/결과 수정
 # ══════════════════════════════════════════════
 
 def _parse_winning_team(match: Match) -> Optional[str]:
-    """match.result_summary에서 승리팀 추출 (예: "1팀 승리" → "1팀")"""
+    """match.result_summary에서 승리팀 추출"""
     if not match.result_summary or match.result_summary == "무승부":
         return None
     return match.result_summary.replace(" 승리", "").strip()
 
 
 def update_teams(db: Session, match_id: int, assignments: list[dict]) -> Match:
-    """
-    팀 편성 수정 (편성완료 이후 사용)
-
-    assignments: [{"member_id": int, "team": "1팀"|"2팀"|"3팀"}]
-
-    - 확정완료 상태에서는 거부
-    - 경기완료 상태에서 팀이 바뀌면 match_result도 재계산
-    """
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise ValueError("경기를 찾을 수 없습니다.")
@@ -257,7 +240,6 @@ def update_teams(db: Session, match_id: int, assignments: list[dict]) -> Match:
     for a in assignments:
         mid = a["member_id"]
         team = a["team"]
-
         record = (
             db.query(MatchRecord)
             .filter(MatchRecord.match_id == match_id, MatchRecord.member_id == mid)
@@ -266,11 +248,8 @@ def update_teams(db: Session, match_id: int, assignments: list[dict]) -> Match:
         if not record:
             record = MatchRecord(match_id=match_id, member_id=mid, attendance="참석")
             db.add(record)
-
         record.attendance = "참석"
         record.team = team
-
-        # 경기완료 상태에서는 team 변경에 따라 match_result 재계산
         if result_recorded:
             if is_draw:
                 record.match_result = "무"
@@ -285,11 +264,6 @@ def update_teams(db: Session, match_id: int, assignments: list[dict]) -> Match:
 
 
 def update_duties(db: Session, match_id: int, duties: list[dict]) -> Match:
-    """
-    담당자(골대/음료) 수정 (시스템관리자 전용)
-
-    duties: [{"member_id": int, "duty": ""|"골대"|"음료"|"음료, 골대"}]
-    """
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise ValueError("경기를 찾을 수 없습니다.")
@@ -299,15 +273,13 @@ def update_duties(db: Session, match_id: int, duties: list[dict]) -> Match:
         raise ValueError("먼저 팀 편성을 완료해주세요.")
 
     for d in duties:
-        mid = d["member_id"]
-        duty = d["duty"]
         record = (
             db.query(MatchRecord)
-            .filter(MatchRecord.match_id == match_id, MatchRecord.member_id == mid)
+            .filter(MatchRecord.match_id == match_id, MatchRecord.member_id == d["member_id"])
             .first()
         )
         if record:
-            record.duty = duty
+            record.duty = d["duty"]
 
     db.commit()
     db.refresh(match)
@@ -315,19 +287,8 @@ def update_duties(db: Session, match_id: int, duties: list[dict]) -> Match:
 
 
 def update_result_members(
-    db: Session,
-    match_id: int,
-    additions: list[dict],
-    removals: list[int],
+    db: Session, match_id: int, additions: list[dict], removals: list[int]
 ) -> Match:
-    """
-    결과 탭에서 승/패 명단 수정 (경기완료 상태, 확정완료 전)
-
-    additions: [{"member_id": int, "team": "1팀"|"2팀"}] - 새로 추가/변경
-    removals: [member_id, ...] - 결과에서 제거 (불참 처리)
-
-    match_result는 match.result_summary 기준으로 자동 재계산
-    """
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise ValueError("경기를 찾을 수 없습니다.")
@@ -339,7 +300,6 @@ def update_result_members(
     winning_team = _parse_winning_team(match)
     is_draw = match.result_summary == "무승부"
 
-    # 제거 처리 - 불참으로 변경
     for mid in removals:
         record = (
             db.query(MatchRecord)
@@ -352,11 +312,9 @@ def update_result_members(
             record.match_result = ""
             record.duty = ""
 
-    # 추가/변경 처리
     for a in additions:
         mid = a["member_id"]
         team = a["team"]
-
         record = (
             db.query(MatchRecord)
             .filter(MatchRecord.match_id == match_id, MatchRecord.member_id == mid)
@@ -365,11 +323,8 @@ def update_result_members(
         if not record:
             record = MatchRecord(match_id=match_id, member_id=mid, attendance="참석")
             db.add(record)
-
         record.attendance = "참석"
         record.team = team
-
-        # match_result 자동 계산
         if is_draw:
             record.match_result = "무"
         elif winning_team and team == winning_team:
@@ -383,7 +338,12 @@ def update_result_members(
 
 
 def confirm_result(db: Session, match_id: int) -> Match:
-    """결과 확정 (경기완료 → 확정완료)"""
+    """
+    결과 확정 (경기완료 → 확정완료)
+
+    ★ 확정과 동시에 다음 주 일요일 경기를 자동 생성하여 투표 즉시 시작!
+       이전에는 매주 수요일에 스케줄러가 투표를 열었지만, 이제는 확정 시점에 바로 다음 경기가 열림.
+    """
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise ValueError("경기를 찾을 수 없습니다.")
@@ -391,19 +351,25 @@ def confirm_result(db: Session, match_id: int) -> Match:
         raise ValueError("경기완료 상태에서만 확정할 수 있습니다.")
 
     match.status = "확정완료"
+
+    # ★ 다음 주 일요일 경기 자동 생성 (7일 후)
+    next_date = match.match_date + timedelta(days=7)
+    existing_next = db.query(Match).filter(Match.match_date == next_date).first()
+    if not existing_next:
+        next_match = Match(match_date=next_date, status="투표중")
+        db.add(next_match)
+
     db.commit()
     db.refresh(match)
     return match
 
 
 def cancel_confirm(db: Session, match_id: int) -> Match:
-    """결과 확정 취소 (확정완료 → 경기완료) - 시스템관리자 전용"""
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise ValueError("경기를 찾을 수 없습니다.")
     if match.status != "확정완료":
         raise ValueError("확정완료 상태가 아닙니다.")
-
     match.status = "경기완료"
     db.commit()
     db.refresh(match)
@@ -411,7 +377,6 @@ def cancel_confirm(db: Session, match_id: int) -> Match:
 
 
 def cancel_assignment(db: Session, match_id: int) -> Match:
-    """편성 취소 - 팀/담당자/결과 모두 초기화, 상태 투표중으로 복귀 (시스템관리자 전용)"""
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise ValueError("경기를 찾을 수 없습니다.")
@@ -429,3 +394,49 @@ def cancel_assignment(db: Session, match_id: int) -> Match:
     db.commit()
     db.refresh(match)
     return match
+
+
+# ══════════════════════════════════════════════
+# ★★★ 신규: 경기/회원 완전 삭제 (시스템관리자) ★★★
+# ══════════════════════════════════════════════
+
+def delete_match(db: Session, match_id: int) -> None:
+    """
+    경기 완전 삭제 (시스템관리자 전용)
+
+    - Match 레코드 삭제
+    - 관련 MatchRecord(투표/팀/결과) 모두 삭제
+    - 이후 /api/matches/next 호출 시 새 경기가 자동 생성됨 (투표중 상태)
+    """
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise ValueError("경기를 찾을 수 없습니다.")
+
+    db.query(MatchRecord).filter(MatchRecord.match_id == match_id).delete(
+        synchronize_session=False
+    )
+    db.delete(match)
+    db.commit()
+
+
+def delete_member_cascade(db: Session, member_id: int) -> str:
+    """
+    회원 완전 삭제 + 경기 기록 cascade 삭제 (시스템관리자 전용)
+
+    returns: 삭제된 회원 이름
+    """
+    member = db.query(Member).filter(Member.id == member_id).first()
+    if not member:
+        raise ValueError("회원을 찾을 수 없습니다.")
+
+    if member.phone == "01000000001":
+        raise ValueError("시스템관리자 계정은 삭제할 수 없습니다.")
+
+    name = member.name
+
+    db.query(MatchRecord).filter(MatchRecord.member_id == member_id).delete(
+        synchronize_session=False
+    )
+    db.delete(member)
+    db.commit()
+    return name
