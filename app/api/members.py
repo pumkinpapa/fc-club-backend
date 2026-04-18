@@ -75,13 +75,17 @@ async def reject_member(
     db: Session = Depends(get_db),
     admin: Member = Depends(get_admin_user),
 ):
-    member = db.query(Member).filter(Member.id == member_id).first()
-    if not member:
-        raise HTTPException(status_code=404, detail="회원을 찾을 수 없습니다.")
-    member.status = "거절"
-    db.commit()
-    db.refresh(member)
-    return {"message": f"{member.name}님이 거절되었습니다."}
+    """
+    가입 신청 거절 = 회원 기록 완전 삭제
+
+    - 기존에는 status="거절"로 마킹만 했으나, 투표 탭의 '미응답'에 계속 남는 문제가 있음
+    - 거절 시 Member 및 관련 MatchRecord를 완전 삭제하여 모든 화면에서 즉시 사라지도록 변경
+    """
+    try:
+        name = delete_member_cascade(db, member_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"message": f"{name}님의 가입 신청이 거절되었습니다."}
 
 
 @router.get("/{member_id}", response_model=MemberResponse)
