@@ -18,6 +18,10 @@ class Member(Base):
         String(20), default="회원",
         comment="직책 (회장/관리자/회원)"
     )
+    status = Column(
+        String(20), default="대기",
+        comment="가입상태 (대기/승인/거절)"
+    )
     kakao_id = Column(String(100), unique=True, nullable=True, comment="카카오 고유 ID")
     join_date = Column(
         DateTime, default=lambda: datetime.now(timezone.utc),
@@ -29,7 +33,7 @@ class Member(Base):
     match_records = relationship("MatchRecord", back_populates="member")
 
     def __repr__(self):
-        return f"<Member(id={self.id}, name={self.name}, role={self.role})>"
+        return f"<Member(id={self.id}, name={self.name}, role={self.role}, status={self.status})>"
 
 
 class Match(Base):

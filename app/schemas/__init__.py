@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 # ─── 인증 ───
 class KakaoLoginRequest(BaseModel):
-    code: str  # 카카오 인증 코드
+    code: str
 
 
 class PhoneLoginRequest(BaseModel):
@@ -14,9 +14,8 @@ class PhoneLoginRequest(BaseModel):
 
 class RegisterRequest(BaseModel):
     name: str
-    birth: str  # YYYY-MM-DD
+    birth: str
     phone: str
-    verify_code: str
 
 
 class TokenResponse(BaseModel):
@@ -32,6 +31,7 @@ class MemberResponse(BaseModel):
     birth: str
     phone: str
     role: str
+    status: str = "승인"
     join_date: Optional[datetime] = None
     note: str = ""
 
@@ -44,6 +44,7 @@ class MemberUpdate(BaseModel):
     birth: Optional[str] = None
     phone: Optional[str] = None
     role: Optional[str] = None
+    status: Optional[str] = None
     note: Optional[str] = None
 
 
@@ -59,7 +60,7 @@ class MatchResponse(BaseModel):
 
 
 class VoteRequest(BaseModel):
-    attendance: str  # "참석" or "불참"
+    attendance: str
 
 
 class MatchRecordResponse(BaseModel):
@@ -88,13 +89,13 @@ class VoteStatusResponse(BaseModel):
 # ─── 팀 편성 ───
 class TeamAssignmentResponse(BaseModel):
     match: MatchResponse
-    teams: dict  # {"1팀": [...], "2팀": [...]}
-    duties: dict  # {"골대": [...], "음료": [...]}
+    teams: dict
+    duties: dict
 
 
 # ─── 경기 결과 ───
 class ResultRequest(BaseModel):
-    winning_team: str  # "1팀", "2팀", "3팀", "무승부"
+    winning_team: str
 
 
 # ─── 랭킹 ───
