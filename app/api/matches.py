@@ -24,7 +24,9 @@ from app.services.match_service import (
     update_teams, update_duties, update_result_members,
     confirm_result, cancel_confirm, cancel_assignment,
     delete_match,
-    set_vote_for_member,  # ★ 신규
+    set_vote_for_member,
+    record_three_team_result,  # ★ 신규: 3팀 경기
+    THREE_TEAM_MARKER,
 )
 from app.services.solapi_service import send_alimtalk_bulk
 
@@ -160,20 +162,26 @@ async def assign_teams(
     match_id: int,
     db: Session = Depends(get_db),
     admin: Member = Depends(get_admin_user),
+    num_teams: Optional[int] = Query(None, description="2 또는 3 (미지정 시 자동)"),
 ):
+    """팀 편성 및 역할 배정 (관리자 전용)
+    - num_teams 쿼리 파라미터로 2팀/3팀 선택 가능
+    - 미지정 시 18명 이상이면 3팀, 그 외 2팀 자동
+    """
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
 
     try:
-        result = assign_teams_and_duties(db, match_id)
+        result = assign_teams_and_duties(db, match_id, num_teams=num_teams)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     return {
-        "message": "팀 편성이 완료되었습니다.",
+        "message": f"{result.get('num_teams',2)}팀 편성이 완료되었습니다.",
         "teams": result["teams"],
         "duties": result["duties"],
+        "num_teams": result.get("num_teams", 2),
     }
 
 
@@ -236,6 +244,38 @@ async def submit_result(
 
     return {
         "message": f"경기 결과가 기록되었습니다: {match.result_summary}",
+        "match": MatchResponse.model_validate(match),
+    }
+
+
+# ★★★ 신규: 3팀 경기 결과 입력 ★★★
+class ThreeTeamResultRequest(BaseModel):
+    rankings: dict  # {"1팀": 1, "2팀": 3, "3팀": 2} 형식
+
+
+@router.post("/{match_id}/result-3team")
+async def submit_three_team_result(
+    match_id: int,
+    req: ThreeTeamResultRequest,
+    db: Session = Depends(get_db),
+    admin: Member = Depends(get_admin_user),
+):
+    """3팀 경기 결과 기록 (관리자 전용)"""
+    # rankings의 값이 int인지 검증
+    rankings = {}
+    try:
+        for team, rank in req.rankings.items():
+            rankings[str(team)] = int(rank)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="순위는 1, 2, 3 숫자여야 합니다.")
+
+    try:
+        match = record_three_team_result(db, match_id, rankings)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "message": f"3팀 경기 결과가 기록되었습니다",
         "match": MatchResponse.model_validate(match),
     }
 
@@ -632,4 +672,121 @@ async def migrate_to_new_db(
         "matches": len(matches_data),
         "match_records": len(records_data),
         "next_step": "Render 대시보드에서 DATABASE_URL을 새 URL로 변경하고 저장하세요.",
+    }
+
+
+# ══════════════════════════════════════════════
+# ★★★ 엑셀 과거 경기 기록 일괄 Import (시스템관리자) ★★★
+# ══════════════════════════════════════════════
+
+class ImportMatchItem(BaseModel):
+    date: str  # "2026-01-04" 형식
+    summary: str  # "1팀 승리", "무승부", "[3팀] 1위:1팀 2위:2팀 3위:3팀"
+    records: List[List[str]]  # [["김철수", "승"], ...]
+    num_teams: int = 2  # 2 또는 3 (3이면 3팀 경기)
+
+
+class ImportMatchesRequest(BaseModel):
+    matches: List[ImportMatchItem]
+    skip_existing: bool = True
+
+
+@router.post("/import-history")
+async def import_match_history(
+    req: ImportMatchesRequest,
+    db: Session = Depends(get_db),
+    sys_admin: Member = Depends(get_system_admin_user),
+):
+    """
+    과거 경기 기록 일괄 import (시스템관리자 전용)
+    - 이름으로 회원 매핑, 없는 회원은 건너뜀
+    - num_teams=3이면 3팀 경기로 저장
+    """
+    from datetime import datetime
+
+    members_by_name = {m.name: m.id for m in db.query(Member).all()}
+
+    created_matches = 0
+    skipped_matches = 0
+    total_records = 0
+    skipped_names = set()
+
+    for item in req.matches:
+        try:
+            match_date = datetime.strptime(item.date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"잘못된 날짜 형식: {item.date}")
+
+        existing = db.query(Match).filter(Match.match_date == match_date).first()
+        if existing:
+            if req.skip_existing:
+                skipped_matches += 1
+                continue
+            else:
+                db.query(MatchRecord).filter(MatchRecord.match_id == existing.id).delete(
+                    synchronize_session=False
+                )
+                db.delete(existing)
+                db.commit()
+
+        is_three = item.num_teams == 3
+
+        # result_summary 조정
+        if is_three and not item.summary.startswith(THREE_TEAM_MARKER):
+            summary = f"{THREE_TEAM_MARKER} 1위:1팀 2위:2팀 3위:3팀"
+        else:
+            summary = item.summary
+
+        match = Match(
+            match_date=match_date,
+            status="확정완료",
+            result_summary=summary,
+        )
+        db.add(match)
+        db.commit()
+        db.refresh(match)
+
+        for name, result in item.records:
+            mid = members_by_name.get(name)
+            if mid is None:
+                skipped_names.add(name)
+                continue
+
+            if is_three:
+                # 3팀: 승=1팀, 무=2팀, 패=3팀
+                if result == "승":
+                    team = "1팀"
+                elif result == "무":
+                    team = "2팀"
+                else:
+                    team = "3팀"
+            else:
+                # 2팀
+                if result == "승":
+                    team = "1팀"
+                elif result == "패":
+                    team = "2팀"
+                else:
+                    team = "1팀"
+
+            record = MatchRecord(
+                match_id=match.id,
+                member_id=mid,
+                attendance="참석",
+                team=team,
+                duty="",
+                match_result=result,
+            )
+            db.add(record)
+            total_records += 1
+
+        db.commit()
+        created_matches += 1
+
+    return {
+        "message": "과거 경기 기록 import 완료",
+        "created_matches": created_matches,
+        "skipped_matches": skipped_matches,
+        "total_records": total_records,
+        "skipped_members": sorted(list(skipped_names)),
     }
