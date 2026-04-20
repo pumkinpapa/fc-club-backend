@@ -266,6 +266,68 @@ async def get_match_records(
 
 
 # ══════════════════════════════════════════════
+# ★★★ 신규: 전체 경기 기록 조회 (결과탭 이력용) ★★★
+# ══════════════════════════════════════════════
+
+@router.get("/history/all")
+async def get_all_match_history(
+    db: Session = Depends(get_db),
+    current_user: Member = Depends(get_current_user),
+):
+    """
+    모든 경기 + 각 경기별 참여 기록을 한 번에 조회 (결과탭 전체 이력용)
+
+    - 경기일 내림차순 정렬
+    - 투표중 상태 포함
+    - 각 경기마다 attendees(참석자) 리스트 포함
+    """
+    matches = (
+        db.query(Match)
+        .order_by(Match.match_date.desc())
+        .all()
+    )
+
+    # 모든 회원을 한 번에 조회해 캐시 (N+1 쿼리 방지)
+    members = {m.id: m for m in db.query(Member).all()}
+
+    result = []
+    for match in matches:
+        records = (
+            db.query(MatchRecord)
+            .filter(
+                MatchRecord.match_id == match.id,
+                MatchRecord.attendance == "참석",
+            )
+            .all()
+        )
+
+        attendees = []
+        for r in records:
+            member = members.get(r.member_id)
+            if not member:
+                continue
+            attendees.append({
+                "member_id": r.member_id,
+                "member_name": member.name,
+                "member_birth": member.birth,
+                "team": r.team or "",
+                "duty": r.duty or "",
+                "match_result": r.match_result or "",
+            })
+
+        result.append({
+            "id": match.id,
+            "match_date": match.match_date.isoformat() if match.match_date else None,
+            "status": match.status,
+            "result_summary": match.result_summary,
+            "attendees": attendees,
+            "attendee_count": len(attendees),
+        })
+
+    return {"matches": result, "total": len(result)}
+
+
+# ══════════════════════════════════════════════
 # 팀/담당자/결과 수정 API
 # ══════════════════════════════════════════════
 
