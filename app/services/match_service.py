@@ -12,11 +12,23 @@ from app.models import Match, MatchRecord, Member
 
 
 # ──────────────────────────────────────────────
+# 상수
+# ──────────────────────────────────────────────
+
+THREE_TEAM_THRESHOLD = 18  # 18명 이상이면 3팀으로 편성
+THREE_TEAM_MARKER = "[3팀]"  # result_summary에 이 접두사가 있으면 3팀 경기
+
+
+def is_three_team_match(match: Match) -> bool:
+    """Match가 3팀 경기인지 판별 (result_summary 기반)"""
+    return bool(match.result_summary and match.result_summary.startswith(THREE_TEAM_MARKER))
+
+
+# ──────────────────────────────────────────────
 # 기존 함수들
 # ──────────────────────────────────────────────
 
 def get_next_match_date(match_day: int = 6) -> date:
-    """다음 경기일(일요일) 계산"""
     today = date.today()
     days_ahead = match_day - today.weekday()
     if days_ahead <= 0:
@@ -25,7 +37,6 @@ def get_next_match_date(match_day: int = 6) -> date:
 
 
 def get_or_create_match(db: Session, match_date: date) -> Match:
-    """해당 날짜의 경기를 조회하거나 새로 생성"""
     match = db.query(Match).filter(Match.match_date == match_date).first()
     if not match:
         match = Match(match_date=match_date, status="투표중")
@@ -36,7 +47,6 @@ def get_or_create_match(db: Session, match_date: date) -> Match:
 
 
 def vote(db: Session, match_id: int, member_id: int, attendance: str) -> MatchRecord:
-    """참석여부 투표"""
     record = (
         db.query(MatchRecord)
         .filter(MatchRecord.match_id == match_id, MatchRecord.member_id == member_id)
@@ -45,11 +55,7 @@ def vote(db: Session, match_id: int, member_id: int, attendance: str) -> MatchRe
     if record:
         record.attendance = attendance
     else:
-        record = MatchRecord(
-            match_id=match_id,
-            member_id=member_id,
-            attendance=attendance,
-        )
+        record = MatchRecord(match_id=match_id, member_id=member_id, attendance=attendance)
         db.add(record)
     db.commit()
     db.refresh(record)
@@ -59,13 +65,6 @@ def vote(db: Session, match_id: int, member_id: int, attendance: str) -> MatchRe
 def set_vote_for_member(
     db: Session, match_id: int, member_id: int, attendance: str
 ) -> Optional[MatchRecord]:
-    """
-    특정 회원의 투표 상태를 대신 변경 (시스템관리자 전용)
-
-    - attendance가 "참석" 또는 "불참"이면 vote() 호출
-    - attendance가 "미응답" 또는 "" 이면 MatchRecord 삭제 (투표 안 한 상태로 복귀)
-    - 편성완료 이후에는 팀/결과가 있을 수 있으므로, "미응답"으로 되돌릴 때는 그 필드들도 초기화됨
-    """
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise ValueError("경기를 찾을 수 없습니다.")
@@ -79,7 +78,6 @@ def set_vote_for_member(
         raise ValueError("승인된 회원만 투표 대상입니다.")
 
     if attendance in ("미응답", "", None):
-        # MatchRecord 삭제
         db.query(MatchRecord).filter(
             MatchRecord.match_id == match_id,
             MatchRecord.member_id == member_id,
@@ -96,7 +94,6 @@ def set_vote_for_member(
 def get_vote_status(db: Session, match: Match) -> dict:
     """투표 현황 조회 (승인된 회원만 대상)"""
     records = db.query(MatchRecord).filter(MatchRecord.match_id == match.id).all()
-    # ★ status="승인"인 회원만 대상 (대기/거절 회원은 투표 집계에서 제외)
     all_members = db.query(Member).filter(Member.status == "승인").all()
 
     voted_member_ids = {r.member_id for r in records}
@@ -105,19 +102,14 @@ def get_vote_status(db: Session, match: Match) -> dict:
     absentees = [r for r in records if r.attendance == "불참"]
     pending = [m for m in all_members if m.id not in voted_member_ids]
 
-    return {
-        "attendees": attendees,
-        "absentees": absentees,
-        "pending": pending,
-    }
+    return {"attendees": attendees, "absentees": absentees, "pending": pending}
 
 
-def assign_teams_and_duties(db: Session, match_id: int) -> dict:
+def assign_teams_and_duties(db: Session, match_id: int, num_teams: int = None) -> dict:
     """
     팀 편성 및 역할 배정
-
-    - 골대담당 2명, 음료담당 1명 랜덤 배정
-    - 인원 수에 따라 2팀 또는 3팀 (21명 이상 시 3팀)
+    - num_teams: 2 또는 3 (관리자가 선택)
+    - num_teams가 None이면 자동: 18명 이상이면 3팀, 그 외는 2팀
     """
     records = (
         db.query(MatchRecord)
@@ -127,6 +119,14 @@ def assign_teams_and_duties(db: Session, match_id: int) -> dict:
 
     if len(records) < 3:
         raise ValueError("최소 3명 이상이 참석해야 팀 편성이 가능합니다.")
+
+    # num_teams 결정
+    if num_teams is None:
+        num_teams = 3 if len(records) >= THREE_TEAM_THRESHOLD else 2
+    elif num_teams not in (2, 3):
+        raise ValueError("팀 수는 2 또는 3이어야 합니다.")
+    elif num_teams == 3 and len(records) < 3:
+        raise ValueError("3팀 편성은 최소 3명이 필요합니다.")
 
     shuffled = list(records)
     random.shuffle(shuffled)
@@ -140,7 +140,6 @@ def assign_teams_and_duties(db: Session, match_id: int) -> dict:
         r.duty = "골대"
     drink_person.duty = "음료" if drink_person.duty != "골대" else "음료, 골대"
 
-    num_teams = 3 if len(records) >= 21 else 2
     for i, record in enumerate(shuffled):
         record.team = f"{(i % num_teams) + 1}팀"
 
@@ -157,23 +156,17 @@ def assign_teams_and_duties(db: Session, match_id: int) -> dict:
         team_name = r.team
         if team_name not in teams:
             teams[team_name] = []
-        teams[team_name].append({
-            "member_id": r.member_id,
-            "name": member.name,
-            "duty": r.duty,
-        })
+        teams[team_name].append({"member_id": r.member_id, "name": member.name, "duty": r.duty})
         if "골대" in r.duty:
             duties["골대"].append(member.name)
         if "음료" in r.duty:
             duties["음료"].append(member.name)
 
-    return {"teams": teams, "duties": duties}
+    return {"teams": teams, "duties": duties, "num_teams": num_teams}
 
 
 def record_result(db: Session, match_id: int, winning_team: str) -> Match:
-    """
-    경기 결과 기록
-    """
+    """경기 결과 기록 (2팀 경기용)"""
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise ValueError("경기를 찾을 수 없습니다.")
@@ -187,6 +180,11 @@ def record_result(db: Session, match_id: int, winning_team: str) -> Match:
         .all()
     )
 
+    # 3팀 경기 방지
+    teams_present = set(r.team for r in records if r.team)
+    if len(teams_present) >= 3:
+        raise ValueError("3팀 경기는 3팀 결과 입력을 사용해주세요.")
+
     for record in records:
         if winning_team == "무승부":
             record.match_result = "무"
@@ -196,8 +194,59 @@ def record_result(db: Session, match_id: int, winning_team: str) -> Match:
             record.match_result = "패"
 
     match.status = "경기완료"
+    match.result_summary = "무승부" if winning_team == "무승부" else f"{winning_team} 승리"
+
+    db.commit()
+    db.refresh(match)
+    return match
+
+
+def record_three_team_result(db: Session, match_id: int, rankings: dict) -> Match:
+    """
+    3팀 경기 결과 기록
+
+    rankings: {"1팀": 1, "2팀": 3, "3팀": 2} 형식
+    - 1위팀 멤버 → match_result="승"
+    - 2위팀 멤버 → match_result="무"
+    - 3위팀 멤버 → match_result="패"
+    result_summary: "[3팀] 1위:1팀 2위:3팀 3위:2팀"
+    """
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise ValueError("경기를 찾을 수 없습니다.")
+
+    if match.status == "확정완료":
+        raise ValueError("확정완료된 경기는 결과를 변경할 수 없습니다.")
+
+    if not isinstance(rankings, dict):
+        raise ValueError("rankings는 {팀:순위} 형식이어야 합니다.")
+
+    expected_teams = {"1팀", "2팀", "3팀"}
+    if set(rankings.keys()) != expected_teams:
+        raise ValueError(f"3팀 모두({expected_teams})의 순위를 지정해야 합니다.")
+
+    if sorted(rankings.values()) != [1, 2, 3]:
+        raise ValueError("순위는 1, 2, 3이 각각 한 번씩이어야 합니다.")
+
+    rank_to_result = {1: "승", 2: "무", 3: "패"}
+
+    records = (
+        db.query(MatchRecord)
+        .filter(MatchRecord.match_id == match_id, MatchRecord.attendance == "참석")
+        .all()
+    )
+
+    for record in records:
+        team_rank = rankings.get(record.team)
+        if team_rank is None:
+            record.match_result = ""
+        else:
+            record.match_result = rank_to_result[team_rank]
+
+    match.status = "경기완료"
+    team_by_rank = {v: k for k, v in rankings.items()}
     match.result_summary = (
-        "무승부" if winning_team == "무승부" else f"{winning_team} 승리"
+        f"{THREE_TEAM_MARKER} 1위:{team_by_rank[1]} 2위:{team_by_rank[2]} 3위:{team_by_rank[3]}"
     )
 
     db.commit()
@@ -206,8 +255,15 @@ def record_result(db: Session, match_id: int, winning_team: str) -> Match:
 
 
 def get_rankings(db: Session) -> list[dict]:
-    """누적 승점 랭킹 계산 (MatchRecord에서 실시간 집계)"""
+    """
+    누적 승점 랭킹 계산
+
+    2팀 경기: 승=3점, 무=1점, 패=0점
+    3팀 경기: 1위(승)=3점, 2위(무)=1점, 3위(패)=0점
+    """
     members = db.query(Member).all()
+    matches_map = {m.id: m for m in db.query(Match).all()}
+
     stats = {}
 
     for member in members:
@@ -221,11 +277,28 @@ def get_rankings(db: Session) -> list[dict]:
             .all()
         )
 
-        wins = sum(1 for r in records if r.match_result == "승")
-        draws = sum(1 for r in records if r.match_result == "무")
-        losses = sum(1 for r in records if r.match_result == "패")
+        wins = 0
+        draws = 0
+        losses = 0
+        points = 0
+
+        for r in records:
+            match = matches_map.get(r.match_id)
+            three_team = match and is_three_team_match(match)
+
+            if r.match_result == "승":
+                wins += 1
+                points += 3
+            elif r.match_result == "무":
+                draws += 1
+                # 2팀 무승부 = 1점, 3팀 2위 = 1점 (동일)
+                points += 1
+            elif r.match_result == "패":
+                losses += 1
+                # 2팀 패배 = 0점, 3팀 3위 = 0점 (동일)
+                points += 0
+
         played = wins + draws + losses
-        points = wins * 3 + draws * 1
 
         if played > 0:
             stats[member.id] = {
@@ -239,11 +312,7 @@ def get_rankings(db: Session) -> list[dict]:
                 "attendance_count": len(records),
             }
 
-    ranked = sorted(
-        stats.values(),
-        key=lambda x: (x["points"], x["wins"]),
-        reverse=True,
-    )
+    ranked = sorted(stats.values(), key=lambda x: (x["points"], x["wins"]), reverse=True)
 
     for i, entry in enumerate(ranked):
         entry["rank"] = i + 1
@@ -256,10 +325,31 @@ def get_rankings(db: Session) -> list[dict]:
 # ══════════════════════════════════════════════
 
 def _parse_winning_team(match: Match) -> Optional[str]:
-    """match.result_summary에서 승리팀 추출"""
+    """승리팀(1위) 추출 - 2팀/3팀 공용"""
     if not match.result_summary or match.result_summary == "무승부":
         return None
+    if is_three_team_match(match):
+        try:
+            after = match.result_summary.split("1위:")[1]
+            return after.split(" ")[0]
+        except (IndexError, AttributeError):
+            return None
     return match.result_summary.replace(" 승리", "").strip()
+
+
+def _get_three_team_rankings(match: Match) -> Optional[dict]:
+    """3팀 경기의 {팀: 순위} 딕셔너리 반환"""
+    if not is_three_team_match(match):
+        return None
+    result = {}
+    for rank_num in (1, 2, 3):
+        try:
+            after = match.result_summary.split(f"{rank_num}위:")[1]
+            team = after.split(" ")[0]
+            result[team] = rank_num
+        except (IndexError, AttributeError):
+            return None
+    return result
 
 
 def update_teams(db: Session, match_id: int, assignments: list[dict]) -> Match:
@@ -274,6 +364,9 @@ def update_teams(db: Session, match_id: int, assignments: list[dict]) -> Match:
     winning_team = _parse_winning_team(match)
     is_draw = match.result_summary == "무승부"
     result_recorded = match.status == "경기완료"
+    three_team = is_three_team_match(match)
+    three_rankings = _get_three_team_rankings(match) if three_team else None
+    rank_to_result = {1: "승", 2: "무", 3: "패"}
 
     for a in assignments:
         mid = a["member_id"]
@@ -289,7 +382,10 @@ def update_teams(db: Session, match_id: int, assignments: list[dict]) -> Match:
         record.attendance = "참석"
         record.team = team
         if result_recorded:
-            if is_draw:
+            if three_team and three_rankings:
+                team_rank = three_rankings.get(team)
+                record.match_result = rank_to_result.get(team_rank, "") if team_rank else ""
+            elif is_draw:
                 record.match_result = "무"
             elif winning_team and team == winning_team:
                 record.match_result = "승"
@@ -337,6 +433,9 @@ def update_result_members(
 
     winning_team = _parse_winning_team(match)
     is_draw = match.result_summary == "무승부"
+    three_team = is_three_team_match(match)
+    three_rankings = _get_three_team_rankings(match) if three_team else None
+    rank_to_result = {1: "승", 2: "무", 3: "패"}
 
     for mid in removals:
         record = (
@@ -363,7 +462,10 @@ def update_result_members(
             db.add(record)
         record.attendance = "참석"
         record.team = team
-        if is_draw:
+        if three_team and three_rankings:
+            team_rank = three_rankings.get(team)
+            record.match_result = rank_to_result.get(team_rank, "") if team_rank else ""
+        elif is_draw:
             record.match_result = "무"
         elif winning_team and team == winning_team:
             record.match_result = "승"
@@ -376,12 +478,6 @@ def update_result_members(
 
 
 def confirm_result(db: Session, match_id: int) -> Match:
-    """
-    결과 확정 (경기완료 → 확정완료)
-
-    ★ 확정과 동시에 다음 주 일요일 경기를 자동 생성하여 투표 즉시 시작!
-       이전에는 매주 수요일에 스케줄러가 투표를 열었지만, 이제는 확정 시점에 바로 다음 경기가 열림.
-    """
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise ValueError("경기를 찾을 수 없습니다.")
@@ -390,7 +486,6 @@ def confirm_result(db: Session, match_id: int) -> Match:
 
     match.status = "확정완료"
 
-    # ★ 다음 주 일요일 경기 자동 생성 (7일 후)
     next_date = match.match_date + timedelta(days=7)
     existing_next = db.query(Match).filter(Match.match_date == next_date).first()
     if not existing_next:
@@ -434,35 +529,17 @@ def cancel_assignment(db: Session, match_id: int) -> Match:
     return match
 
 
-# ══════════════════════════════════════════════
-# ★★★ 신규: 경기/회원 완전 삭제 (시스템관리자) ★★★
-# ══════════════════════════════════════════════
-
 def delete_match(db: Session, match_id: int) -> None:
-    """
-    경기 완전 삭제 (시스템관리자 전용)
-
-    - Match 레코드 삭제
-    - 관련 MatchRecord(투표/팀/결과) 모두 삭제
-    - 이후 /api/matches/next 호출 시 새 경기가 자동 생성됨 (투표중 상태)
-    """
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise ValueError("경기를 찾을 수 없습니다.")
 
-    db.query(MatchRecord).filter(MatchRecord.match_id == match_id).delete(
-        synchronize_session=False
-    )
+    db.query(MatchRecord).filter(MatchRecord.match_id == match_id).delete(synchronize_session=False)
     db.delete(match)
     db.commit()
 
 
 def delete_member_cascade(db: Session, member_id: int) -> str:
-    """
-    회원 완전 삭제 + 경기 기록 cascade 삭제 (시스템관리자 전용)
-
-    returns: 삭제된 회원 이름
-    """
     member = db.query(Member).filter(Member.id == member_id).first()
     if not member:
         raise ValueError("회원을 찾을 수 없습니다.")
@@ -472,9 +549,7 @@ def delete_member_cascade(db: Session, member_id: int) -> str:
 
     name = member.name
 
-    db.query(MatchRecord).filter(MatchRecord.member_id == member_id).delete(
-        synchronize_session=False
-    )
+    db.query(MatchRecord).filter(MatchRecord.member_id == member_id).delete(synchronize_session=False)
     db.delete(member)
     db.commit()
     return name
