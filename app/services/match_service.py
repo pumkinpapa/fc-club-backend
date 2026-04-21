@@ -477,7 +477,24 @@ def update_result_members(
     return match
 
 
+def get_next_sunday_from_date(from_date: date) -> date:
+    """주어진 날짜 이후의 가장 빠른 일요일 반환 (from_date가 일요일이면 다음 일요일)"""
+    # Python weekday: 월=0, 화=1, 수=2, 목=3, 금=4, 토=5, 일=6
+    days_until_sunday = (6 - from_date.weekday()) % 7
+    if days_until_sunday == 0:
+        days_until_sunday = 7  # 오늘이 일요일이면 다음 주 일요일
+    return from_date + timedelta(days=days_until_sunday)
+
+
 def confirm_result(db: Session, match_id: int) -> Match:
+    """
+    결과 확정. 현재 경기일 이후 가장 빠른 일요일 경기 자동 생성.
+
+    규칙:
+    - 현재 경기가 일요일이면 다음 주 일요일 (+7일)
+    - 현재 경기가 평일이면 그 주의 다음 일요일
+    - 현재 경기일 기준이므로, 관리자가 과거 날짜로 수정 후 확정해도 항상 현재 경기일 이후가 됨
+    """
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
         raise ValueError("경기를 찾을 수 없습니다.")
@@ -486,12 +503,55 @@ def confirm_result(db: Session, match_id: int) -> Match:
 
     match.status = "확정완료"
 
-    next_date = match.match_date + timedelta(days=7)
+    # ★ 현재 경기일 이후의 가장 빠른 일요일 계산
+    # Python: weekday() → 월=0, 화=1, ..., 일=6
+    current = match.match_date
+    days_until_sunday = (6 - current.weekday()) % 7
+    if days_until_sunday == 0:
+        # 현재 경기가 일요일 → 다음 주 일요일 (+7일)
+        next_date = current + timedelta(days=7)
+    else:
+        # 평일 경기 → 그 주의 다음 일요일
+        next_date = current + timedelta(days=days_until_sunday)
+
     existing_next = db.query(Match).filter(Match.match_date == next_date).first()
     if not existing_next:
         next_match = Match(match_date=next_date, status="투표중")
         db.add(next_match)
 
+    db.commit()
+    db.refresh(match)
+    return match
+
+
+def update_match_date(db: Session, match_id: int, new_date: date) -> Match:
+    """
+    경기 날짜 변경 (관리자 전용)
+    - 과거 날짜 금지 (오늘 포함 가능)
+    - 같은 날짜에 다른 경기 있으면 거부
+    - 확정완료된 경기는 변경 불가
+    - 투표/팀편성/결과 데이터는 모두 유지
+    """
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise ValueError("경기를 찾을 수 없습니다.")
+
+    if match.status == "확정완료":
+        raise ValueError("확정완료된 경기는 날짜를 변경할 수 없습니다. 확정취소 후 다시 시도하세요.")
+
+    today = date.today()
+    if new_date < today:
+        raise ValueError(f"과거 날짜로 변경할 수 없습니다. (오늘: {today.isoformat()})")
+
+    # 같은 날짜에 다른 경기 확인 (자기 자신 제외)
+    conflict = db.query(Match).filter(
+        Match.match_date == new_date,
+        Match.id != match_id,
+    ).first()
+    if conflict:
+        raise ValueError(f"{new_date.isoformat()} 날짜에 이미 다른 경기가 있습니다.")
+
+    match.match_date = new_date
     db.commit()
     db.refresh(match)
     return match
