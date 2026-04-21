@@ -26,6 +26,7 @@ from app.services.match_service import (
     delete_match,
     set_vote_for_member,
     record_three_team_result,  # ★ 신규: 3팀 경기
+    update_match_date,  # ★ 신규: 경기 날짜 변경
     THREE_TEAM_MARKER,
 )
 from app.services.solapi_service import send_alimtalk_bulk
@@ -505,6 +506,49 @@ async def delete_match_endpoint(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"message": "경기가 삭제되었습니다."}
+
+
+# ══════════════════════════════════════════════
+# ★★★ 신규: 경기 날짜 변경 (관리자) ★★★
+# ══════════════════════════════════════════════
+
+class UpdateMatchDateRequest(BaseModel):
+    new_date: str  # ISO 형식 "2026-05-03"
+
+
+@router.put("/{match_id}/date")
+async def change_match_date(
+    match_id: int,
+    req: UpdateMatchDateRequest,
+    db: Session = Depends(get_db),
+    admin: Member = Depends(get_admin_user),
+):
+    """
+    경기 날짜 변경 (관리자 전용)
+
+    - new_date: "YYYY-MM-DD" 형식
+    - 과거 날짜로 변경 불가
+    - 확정완료된 경기는 변경 불가
+    - 같은 날짜에 다른 경기가 이미 있으면 거부
+    - 투표/팀편성/결과 데이터는 모두 유지됨
+    """
+    try:
+        new_date = date.fromisoformat(req.new_date)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=400,
+            detail="날짜 형식이 올바르지 않습니다. (YYYY-MM-DD)",
+        )
+
+    try:
+        match = update_match_date(db, match_id, new_date)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "message": f"경기 날짜가 {new_date.isoformat()}로 변경되었습니다.",
+        "match": MatchResponse.model_validate(match),
+    }
 
 
 # ══════════════════════════════════════════════
