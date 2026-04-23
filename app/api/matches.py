@@ -898,3 +898,255 @@ async def import_match_history(
         "total_records": total_records,
         "skipped_members": sorted(list(skipped_names)),
     }
+
+
+# ══════════════════════════════════════════════
+# ★★★ 신규: 경기 결과 전체 엑셀 다운로드 (시스템관리자) ★★★
+# ══════════════════════════════════════════════
+
+from fastapi.responses import StreamingResponse
+from io import BytesIO
+from datetime import datetime
+
+
+@router.get("/export/excel")
+async def export_matches_excel(
+    db: Session = Depends(get_db),
+    sys_admin: Member = Depends(get_system_admin_user),
+):
+    """
+    경기 결과 전체 엑셀 다운로드 (시스템관리자 전용)
+
+    - 시트 1: 경기별 요약 (날짜, 상태, 결과, 참석자수)
+    - 시트 2: 개인별 기록 (회원별 참석/결과 매트릭스)
+    """
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="openpyxl 라이브러리가 설치되지 않았습니다.",
+        )
+
+    # 승인된 회원 전체
+    all_members = db.query(Member).filter(Member.status == "승인").order_by(Member.name).all()
+
+    # 모든 경기 (최신순)
+    matches = db.query(Match).order_by(Match.match_date.desc()).all()
+
+    # 모든 MatchRecord를 한 번에 로드
+    all_records = db.query(MatchRecord).all()
+    records_by_match = {}
+    for r in all_records:
+        records_by_match.setdefault(r.match_id, []).append(r)
+
+    wb = openpyxl.Workbook()
+
+    # 스타일 정의
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill(start_color="34D399", end_color="34D399", fill_type="solid")
+    header_align = Alignment(horizontal="center", vertical="center")
+    center_align = Alignment(horizontal="center", vertical="center")
+    thin_border = Border(
+        left=Side(style="thin", color="CCCCCC"),
+        right=Side(style="thin", color="CCCCCC"),
+        top=Side(style="thin", color="CCCCCC"),
+        bottom=Side(style="thin", color="CCCCCC"),
+    )
+
+    # ─── 시트 1: 경기별 요약 ───
+    ws1 = wb.active
+    ws1.title = "경기별 요약"
+
+    headers1 = ["번호", "경기일", "요일", "상태", "결과", "참석자수", "불참자수", "참석자 명단"]
+    for col_idx, header in enumerate(headers1, 1):
+        cell = ws1.cell(row=1, column=col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+        cell.border = thin_border
+
+    days_kr = ["월", "화", "수", "목", "금", "토", "일"]
+    for row_idx, m in enumerate(matches, 2):
+        recs = records_by_match.get(m.id, [])
+        attendees = [r for r in recs if r.attendance == "참석"]
+        absentees = [r for r in recs if r.attendance == "불참"]
+
+        # 참석자 이름 조회
+        member_dict = {mem.id: mem.name for mem in all_members}
+        attendee_names = ", ".join(sorted([member_dict.get(r.member_id, f"삭제됨({r.member_id})") for r in attendees]))
+
+        day_of_week = days_kr[m.match_date.weekday()] if m.match_date else ""
+
+        data = [
+            len(matches) - row_idx + 2,  # 역순 번호 (최신이 1번)
+            m.match_date.strftime("%Y-%m-%d") if m.match_date else "",
+            day_of_week,
+            m.status or "",
+            m.result_summary or "",
+            len(attendees),
+            len(absentees),
+            attendee_names,
+        ]
+        for col_idx, value in enumerate(data, 1):
+            cell = ws1.cell(row=row_idx, column=col_idx, value=value)
+            cell.alignment = Alignment(horizontal="left" if col_idx == 8 else "center", vertical="center", wrap_text=(col_idx == 8))
+            cell.border = thin_border
+
+    # 컬럼 너비
+    widths1 = [6, 14, 6, 10, 22, 10, 10, 80]
+    for col_idx, w in enumerate(widths1, 1):
+        ws1.column_dimensions[get_column_letter(col_idx)].width = w
+    ws1.row_dimensions[1].height = 24
+    ws1.auto_filter.ref = f"A1:{get_column_letter(len(headers1))}1"
+    ws1.freeze_panes = "A2"
+
+    # ─── 시트 2: 개인별 기록 매트릭스 ───
+    ws2 = wb.create_sheet(title="개인별 기록")
+
+    # 경기는 오래된 순으로 정렬 (왼쪽 → 오른쪽)
+    matches_asc = sorted(matches, key=lambda m: m.match_date)
+
+    # 헤더: 이름 | 각 경기 날짜들 | 승 | 무 | 패 | 총참석 | 승점
+    headers2 = ["이름", "생년월일"] + [m.match_date.strftime("%m/%d") for m in matches_asc] + ["승", "무", "패", "총참석", "승점"]
+    for col_idx, header in enumerate(headers2, 1):
+        cell = ws2.cell(row=1, column=col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+        cell.border = thin_border
+
+    # 데이터: 회원별
+    for row_idx, member in enumerate(all_members, 2):
+        wins = draws = losses = total = points = 0
+        row_data = [member.name, member.birth or ""]
+
+        for m in matches_asc:
+            recs = records_by_match.get(m.id, [])
+            my_rec = next((r for r in recs if r.member_id == member.id and r.attendance == "참석"), None)
+
+            if my_rec and my_rec.match_result:
+                result = my_rec.match_result
+                row_data.append(result)
+                total += 1
+                if result == "승":
+                    wins += 1
+                    points += 3
+                elif result == "무":
+                    draws += 1
+                    points += 1
+                elif result == "패":
+                    losses += 1
+            elif my_rec:
+                # 참석했으나 결과 미입력
+                row_data.append("참석")
+                total += 1
+            else:
+                row_data.append("")
+
+        row_data += [wins, draws, losses, total, points]
+
+        for col_idx, value in enumerate(row_data, 1):
+            cell = ws2.cell(row=row_idx, column=col_idx, value=value)
+            cell.alignment = center_align
+            cell.border = thin_border
+
+            # 결과별 색상
+            if isinstance(value, str) and col_idx > 2 and col_idx < len(headers2) - 4:
+                if value == "승":
+                    cell.fill = PatternFill(start_color="D1FAE5", end_color="D1FAE5", fill_type="solid")
+                elif value == "무":
+                    cell.fill = PatternFill(start_color="FEF3C7", end_color="FEF3C7", fill_type="solid")
+                elif value == "패":
+                    cell.fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
+
+    # 컬럼 너비
+    ws2.column_dimensions["A"].width = 12
+    ws2.column_dimensions["B"].width = 12
+    for col_idx in range(3, 3 + len(matches_asc)):
+        ws2.column_dimensions[get_column_letter(col_idx)].width = 7
+    for col_idx in range(3 + len(matches_asc), len(headers2) + 1):
+        ws2.column_dimensions[get_column_letter(col_idx)].width = 9
+
+    ws2.row_dimensions[1].height = 24
+    ws2.freeze_panes = "C2"
+
+    # ─── 시트 3: 업로드 양식 (경기일자별/회원별 승무패) ───
+    # 업로드된 엑셀과 동일한 포맷: 이름 | M/D\n서울숲 | M/D\n서울숲 | ...
+    ws3 = wb.create_sheet(title="경기일자별 기록")
+
+    # 헤더: 이름 | 각 경기 날짜 (오래된 순)
+    ws3.cell(row=1, column=1, value="이름")
+    for col_idx, m in enumerate(matches_asc, 2):
+        # "M/D\n서울숲" 형식 (월은 앞의 0 제거)
+        date_label = f"{m.match_date.month}/{m.match_date.day}\n서울숲"
+        cell = ws3.cell(row=1, column=col_idx, value=date_label)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin_border
+
+    # 첫 번째 헤더 셀 스타일
+    ws3.cell(row=1, column=1).font = header_font
+    ws3.cell(row=1, column=1).fill = header_fill
+    ws3.cell(row=1, column=1).alignment = header_align
+    ws3.cell(row=1, column=1).border = thin_border
+
+    # 데이터: 회원별 (이름 가나다순)
+    members_sorted = sorted(all_members, key=lambda mem: mem.name)
+    for row_idx, member in enumerate(members_sorted, 2):
+        # 이름
+        name_cell = ws3.cell(row=row_idx, column=1, value=member.name)
+        name_cell.alignment = center_align
+        name_cell.border = thin_border
+
+        # 각 경기별 결과
+        for col_idx, m in enumerate(matches_asc, 2):
+            recs = records_by_match.get(m.id, [])
+            my_rec = next((r for r in recs if r.member_id == member.id and r.attendance == "참석"), None)
+
+            value = ""
+            if my_rec and my_rec.match_result:
+                value = my_rec.match_result  # 승/무/패
+            # 참석만 하고 결과 미입력, 불참, 미응답 → 빈칸
+
+            cell = ws3.cell(row=row_idx, column=col_idx, value=value)
+            cell.alignment = center_align
+            cell.border = thin_border
+
+            # 결과별 색상
+            if value == "승":
+                cell.fill = PatternFill(start_color="D1FAE5", end_color="D1FAE5", fill_type="solid")
+            elif value == "무":
+                cell.fill = PatternFill(start_color="FEF3C7", end_color="FEF3C7", fill_type="solid")
+            elif value == "패":
+                cell.fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
+
+    # 컬럼 너비
+    ws3.column_dimensions["A"].width = 12
+    for col_idx in range(2, 2 + len(matches_asc)):
+        ws3.column_dimensions[get_column_letter(col_idx)].width = 11
+
+    # 헤더 행 높이 (줄바꿈 표시용)
+    ws3.row_dimensions[1].height = 36
+    ws3.freeze_panes = "B2"
+
+    # 바이트 스트림으로 저장
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    today = datetime.now().strftime("%Y%m%d")
+    filename = f"FC서울숲_경기기록_{today}.xlsx"
+    from urllib.parse import quote
+    encoded_filename = quote(filename)
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+        },
+    )
