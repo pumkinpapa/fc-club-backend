@@ -35,6 +35,7 @@ class MemberResponse(BaseModel):
     join_date: Optional[datetime] = None
     note: str = ""
     positions: str | None = ""  # ★ 신규
+    photo: str | None = "" 
 
     class Config:
         from_attributes = True
