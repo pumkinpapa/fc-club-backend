@@ -8,6 +8,9 @@ from app.core.database import init_db, SessionLocal
 from app.api import auth, members, matches, rankings
 from app.services.scheduler import start_scheduler, stop_scheduler
 from app.core.init_admin import create_initial_admin
+from app.migration_positions import run_position_migration
+run_position_migration()  # ★ 앱 시작 시 자동 실행
+
 
 settings = get_settings()
 
