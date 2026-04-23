@@ -32,6 +32,9 @@ class Member(Base):
     # 관계
     match_records = relationship("MatchRecord", back_populates="member")
 
+    # ★ 신규 추가
+    positions = Column(String(50), default="")  # 선호 포지션 (쉼표 구분, 최대 2개)
+
     def __repr__(self):
         return f"<Member(id={self.id}, name={self.name}, role={self.role}, status={self.status})>"
 
@@ -51,6 +54,9 @@ class Match(Base):
 
     # 관계
     records = relationship("MatchRecord", back_populates="match", cascade="all, delete-orphan")
+
+    # ★ 신규 추가
+    formations = Column(Text, default="")  # 팀별 포메이션 JSON. ex: {"1팀":"2-3-1","2팀":"3-2-1"}
 
     def __repr__(self):
         return f"<Match(id={self.id}, date={self.match_date}, status={self.status})>"
@@ -73,6 +79,8 @@ class MatchRecord(Base):
         String(10), default="",
         comment="경기결과 (승/무/패)"
     )
+    # ★ 신규 추가
+    position = Column(String(20), default="")  # 편성 시 배정 포지션 (GK, CB, ST 등)
 
     # 관계
     match = relationship("Match", back_populates="records")
