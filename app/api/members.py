@@ -129,6 +129,10 @@ class PositionsUpdate(BaseModel):
     positions: str  # "ST,CM" 형식 (쉼표 구분, 최대 2개), 빈 문자열이면 초기화
 
 
+class PhotoUpdate(BaseModel):
+    photo: str  # Base64 data URL (예: "data:image/jpeg;base64,...") 또는 빈 문자열
+
+
 VALID_POSITIONS = {"GK","CB","LB","RB","DM","CM","AM","LM","RM","ST","LW","RW"}
 
 
@@ -165,6 +169,65 @@ async def update_positions(
         positions_str = ",".join(positions_list)
 
     member.positions = positions_str
+    db.commit()
+    db.refresh(member)
+    return MemberResponse.model_validate(member)
+
+
+# ══════════════════════════════════════════════
+# ★★★ 신규: 프로필 사진 업로드/삭제 (본인 또는 시스템관리자) ★★★
+# ══════════════════════════════════════════════
+
+PHOTO_MAX_SIZE_KB = 200  # 200KB 제한 (Base64 기준, 리사이즈 후 대부분 50KB 이하)
+
+
+@router.put("/{member_id}/photo", response_model=MemberResponse)
+async def update_photo(
+    member_id: int,
+    update: PhotoUpdate,
+    db: Session = Depends(get_db),
+    current_user: Member = Depends(get_current_user),
+):
+    """
+    프로필 사진 업데이트 (본인 또는 시스템관리자)
+    - Base64 data URL 형식
+    - 빈 문자열이면 삭제
+    - 클라이언트에서 미리 리사이즈 필요 (256x256 권장)
+    - 200KB 초과 시 거부
+    """
+    member = db.query(Member).filter(Member.id == member_id).first()
+    if not member:
+        raise HTTPException(status_code=404, detail="회원을 찾을 수 없습니다.")
+
+    # 본인만 수정 가능 (시스템관리자는 예외)
+    if current_user.id != member_id and current_user.phone != SYS_ADMIN_PHONE:
+        raise HTTPException(status_code=403, detail="본인의 사진만 수정할 수 있습니다.")
+
+    photo_data = (update.photo or "").strip()
+
+    # 빈 문자열이면 삭제
+    if not photo_data:
+        member.photo = ""
+        db.commit()
+        db.refresh(member)
+        return MemberResponse.model_validate(member)
+
+    # Data URL 형식 검증
+    if not photo_data.startswith("data:image/"):
+        raise HTTPException(
+            status_code=400,
+            detail="유효하지 않은 이미지 형식입니다. (data:image/... 형식 필요)",
+        )
+
+    # 크기 제한
+    size_kb = len(photo_data) / 1024
+    if size_kb > PHOTO_MAX_SIZE_KB:
+        raise HTTPException(
+            status_code=400,
+            detail=f"이미지 크기가 너무 큽니다. ({size_kb:.0f}KB > {PHOTO_MAX_SIZE_KB}KB)",
+        )
+
+    member.photo = photo_data
     db.commit()
     db.refresh(member)
     return MemberResponse.model_validate(member)
