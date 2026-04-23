@@ -34,7 +34,8 @@ class Member(Base):
 
     # ★ 신규 추가
     positions = Column(String(50), default="")  # 선호 포지션 (쉼표 구분, 최대 2개)
-
+    photo = Column(Text, default="")
+    
     def __repr__(self):
         return f"<Member(id={self.id}, name={self.name}, role={self.role}, status={self.status})>"
 
