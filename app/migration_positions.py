@@ -33,11 +33,14 @@ def add_column_if_not_exists(conn, table: str, column: str, col_type: str, defau
 
 
 def run_position_migration():
-    """포지션 관련 컬럼 자동 추가"""
+    """포지션 + 프로필 사진 관련 컬럼 자동 추가"""
     try:
         with engine.begin() as conn:
             # Member.positions (선호 포지션, 쉼표 구분)
             add_column_if_not_exists(conn, "members", "positions", "VARCHAR(50)", "''")
+
+            # Member.photo (Base64 data URL)
+            add_column_if_not_exists(conn, "members", "photo", "TEXT", "''")
 
             # MatchRecord.position (편성 시 배정 포지션)
             add_column_if_not_exists(conn, "match_records", "position", "VARCHAR(20)", "''")
@@ -45,9 +48,9 @@ def run_position_migration():
             # Match.formations (팀별 포메이션 JSON)
             add_column_if_not_exists(conn, "matches", "formations", "TEXT", "''")
 
-        print("✅ 포지션 마이그레이션 완료")
+        print("✅ 포지션 + 사진 마이그레이션 완료")
     except Exception as e:
-        print(f"⚠️ 포지션 마이그레이션 실패 (무시하고 진행): {e}")
+        print(f"⚠️ 마이그레이션 실패 (무시하고 진행): {e}")
 
 
 if __name__ == "__main__":
