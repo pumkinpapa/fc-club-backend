@@ -193,3 +193,111 @@ async def delete_member(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"message": f"{name}님이 삭제되었습니다."}
+
+
+# ══════════════════════════════════════════════
+# ★★★ 신규: 회원 정보 엑셀 다운로드 (시스템관리자) ★★★
+# ══════════════════════════════════════════════
+
+from fastapi.responses import StreamingResponse
+from io import BytesIO
+from datetime import datetime
+
+
+@router.get("/export/excel")
+async def export_members_excel(
+    db: Session = Depends(get_db),
+    sys_admin: Member = Depends(get_system_admin_user),
+):
+    """
+    회원 정보 엑셀 다운로드 (시스템관리자 전용)
+
+    - 승인된 회원 전체
+    - 이름, 생년월일, 전화번호, 가입일, 역할, 선호 포지션
+    """
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="openpyxl 라이브러리가 설치되지 않았습니다. requirements.txt에 openpyxl 추가 필요.",
+        )
+
+    members = db.query(Member).filter(Member.status == "승인").order_by(Member.join_date).all()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "FC 서울숲 회원"
+
+    # 헤더 스타일
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill(start_color="34D399", end_color="34D399", fill_type="solid")
+    header_align = Alignment(horizontal="center", vertical="center")
+    thin_border = Border(
+        left=Side(style="thin", color="CCCCCC"),
+        right=Side(style="thin", color="CCCCCC"),
+        top=Side(style="thin", color="CCCCCC"),
+        bottom=Side(style="thin", color="CCCCCC"),
+    )
+
+    # 헤더 작성
+    headers = ["번호", "이름", "생년월일", "전화번호", "가입일", "역할", "선호 포지션", "상태"]
+    for col_idx, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+        cell.border = thin_border
+
+    # 데이터 작성
+    for row_idx, member in enumerate(members, 2):
+        join_str = member.join_date.strftime("%Y-%m-%d") if member.join_date else ""
+        birth_str = member.birth or ""
+        role = member.role or "회원"
+        positions = member.positions or ""
+
+        data = [
+            row_idx - 1,  # 번호
+            member.name,
+            birth_str,
+            member.phone,
+            join_str,
+            role,
+            positions,
+            member.status,
+        ]
+        for col_idx, value in enumerate(data, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = thin_border
+
+    # 컬럼 너비 자동 조정
+    column_widths = [8, 14, 14, 16, 14, 10, 14, 10]
+    for col_idx, width in enumerate(column_widths, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = width
+
+    # 헤더 행 높이
+    ws.row_dimensions[1].height = 24
+
+    # 필터 추가
+    ws.auto_filter.ref = ws.dimensions
+
+    # 바이트 스트림으로 저장
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    today = datetime.now().strftime("%Y%m%d")
+    filename = f"FC서울숲_회원목록_{today}.xlsx"
+    # 한글 파일명 인코딩 (RFC 5987)
+    from urllib.parse import quote
+    encoded_filename = quote(filename)
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+        },
+    )
