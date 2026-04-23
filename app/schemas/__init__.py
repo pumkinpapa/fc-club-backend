@@ -34,6 +34,7 @@ class MemberResponse(BaseModel):
     status: str = "승인"
     join_date: Optional[datetime] = None
     note: str = ""
+    positions: str | None = ""  # ★ 신규
 
     class Config:
         from_attributes = True
@@ -54,6 +55,7 @@ class MatchResponse(BaseModel):
     match_date: date
     status: str
     result_summary: Optional[str] = None
+    formations: str | None = ""  # ★ 신규
 
     class Config:
         from_attributes = True
@@ -72,6 +74,7 @@ class MatchRecordResponse(BaseModel):
     attendance: str
     duty: str = ""
     team: str = ""
+    position: str | None = ""  # ★ 신규
     match_result: str = ""
 
     class Config:
