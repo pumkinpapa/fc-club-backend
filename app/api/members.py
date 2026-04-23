@@ -119,6 +119,58 @@ async def update_member(
 
 
 # ══════════════════════════════════════════════
+# ★★★ 신규: 선호 포지션 업데이트 (본인만) ★★★
+# ══════════════════════════════════════════════
+
+from pydantic import BaseModel
+from typing import Optional
+
+class PositionsUpdate(BaseModel):
+    positions: str  # "ST,CM" 형식 (쉼표 구분, 최대 2개), 빈 문자열이면 초기화
+
+
+VALID_POSITIONS = {"GK","CB","LB","RB","DM","CM","AM","LM","RM","ST","LW","RW"}
+
+
+@router.put("/{member_id}/positions", response_model=MemberResponse)
+async def update_positions(
+    member_id: int,
+    update: PositionsUpdate,
+    db: Session = Depends(get_db),
+    current_user: Member = Depends(get_current_user),
+):
+    """
+    선호 포지션 업데이트 (본인만 수정 가능)
+    - 최대 2개 포지션 (쉼표 구분)
+    - 빈 문자열이면 초기화
+    - 유효한 포지션 코드만 허용
+    """
+    member = db.query(Member).filter(Member.id == member_id).first()
+    if not member:
+        raise HTTPException(status_code=404, detail="회원을 찾을 수 없습니다.")
+
+    # 본인만 수정 가능 (시스템관리자는 예외)
+    if current_user.id != member_id and current_user.phone != SYS_ADMIN_PHONE:
+        raise HTTPException(status_code=403, detail="본인의 포지션만 수정할 수 있습니다.")
+
+    # 유효성 검사
+    positions_str = (update.positions or "").strip()
+    if positions_str:
+        positions_list = [p.strip().upper() for p in positions_str.split(",") if p.strip()]
+        if len(positions_list) > 2:
+            raise HTTPException(status_code=400, detail="포지션은 최대 2개까지 선택할 수 있습니다.")
+        invalid = [p for p in positions_list if p not in VALID_POSITIONS]
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"유효하지 않은 포지션: {', '.join(invalid)}")
+        positions_str = ",".join(positions_list)
+
+    member.positions = positions_str
+    db.commit()
+    db.refresh(member)
+    return MemberResponse.model_validate(member)
+
+
+# ══════════════════════════════════════════════
 # ★★★ 수정: 회원 삭제 - 시스템관리자 전용 + cascade ★★★
 # ══════════════════════════════════════════════
 
