@@ -560,6 +560,70 @@ class SetVoteRequest(BaseModel):
     attendance: str  # "참석" | "불참" | "미응답"
 
 
+# ══════════════════════════════════════════════
+# ★★★ 신규: 편성 포지션 업데이트 (관리자) ★★★
+# ══════════════════════════════════════════════
+
+class PositionAssignment(BaseModel):
+    member_id: int
+    position: str  # "ST", "CM", "CB", "GK" 등. 빈 문자열이면 벤치
+
+
+class UpdateFormationRequest(BaseModel):
+    team: str  # "1팀", "2팀", "3팀"
+    formation: str  # "2-3-1" or "3-2-1"
+    positions: list[PositionAssignment]
+
+
+@router.put("/{match_id}/formation")
+async def update_formation(
+    match_id: int,
+    req: UpdateFormationRequest,
+    db: Session = Depends(get_db),
+    admin: Member = Depends(get_admin_user),
+):
+    """
+    팀별 포메이션 + 개인별 포지션 업데이트 (관리자 전용)
+
+    - team: 어떤 팀의 포메이션을 수정할지
+    - formation: "2-3-1" 또는 "3-2-1"
+    - positions: 각 회원별 포지션 배정
+    """
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
+
+    if match.status == "확정완료":
+        raise HTTPException(status_code=400, detail="확정완료된 경기는 수정할 수 없습니다.")
+
+    # 팀별 포메이션 저장 (Match.formations JSON 필드에)
+    import json
+    formations = {}
+    if match.formations:
+        try:
+            formations = json.loads(match.formations)
+        except Exception:
+            formations = {}
+    formations[req.team] = req.formation
+    match.formations = json.dumps(formations, ensure_ascii=False)
+
+    # 회원별 포지션 업데이트
+    for pa in req.positions:
+        rec = db.query(MatchRecord).filter(
+            MatchRecord.match_id == match_id,
+            MatchRecord.member_id == pa.member_id,
+        ).first()
+        if rec:
+            rec.position = pa.position or ""
+
+    db.commit()
+    db.refresh(match)
+    return {
+        "message": f"{req.team} 포메이션이 저장되었습니다.",
+        "formation": req.formation,
+    }
+
+
 @router.put("/{match_id}/set-vote")
 async def set_vote_endpoint(
     match_id: int,
