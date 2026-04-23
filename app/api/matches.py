@@ -580,10 +580,15 @@ async def update_formation(
     match_id: int,
     req: UpdateFormationRequest,
     db: Session = Depends(get_db),
-    admin: Member = Depends(get_admin_user),
+    current_user: Member = Depends(get_current_user),
 ):
     """
-    팀별 포메이션 + 개인별 포지션 업데이트 (관리자 전용)
+    팀별 포메이션 + 개인별 포지션 업데이트
+
+    권한:
+    - 시스템관리자: 모든 팀 수정 가능
+    - 일반 회원/일반 관리자: 본인이 속한 팀만 수정 가능
+    - 본인 팀 미소속: 수정 불가
 
     - team: 어떤 팀의 포메이션을 수정할지
     - formation: "2-3-1" 또는 "3-2-1"
@@ -596,6 +601,19 @@ async def update_formation(
     if match.status == "확정완료":
         raise HTTPException(status_code=400, detail="확정완료된 경기는 수정할 수 없습니다.")
 
+    # ★ 권한 체크: 시스템관리자가 아니면 본인이 해당 팀(req.team)에 속해 있는지 확인
+    is_sys_admin = current_user.phone == SYS_ADMIN_PHONE
+    if not is_sys_admin:
+        my_record = db.query(MatchRecord).filter(
+            MatchRecord.match_id == match_id,
+            MatchRecord.member_id == current_user.id,
+        ).first()
+        if not my_record or my_record.team != req.team:
+            raise HTTPException(
+                status_code=403,
+                detail=f"{req.team} 포메이션은 해당 팀 소속원만 수정할 수 있습니다."
+            )
+
     # 팀별 포메이션 저장 (Match.formations JSON 필드에)
     import json
     formations = {}
@@ -607,13 +625,13 @@ async def update_formation(
     formations[req.team] = req.formation
     match.formations = json.dumps(formations, ensure_ascii=False)
 
-    # 회원별 포지션 업데이트
+    # 회원별 포지션 업데이트 (요청한 팀의 소속원만)
     for pa in req.positions:
         rec = db.query(MatchRecord).filter(
             MatchRecord.match_id == match_id,
             MatchRecord.member_id == pa.member_id,
         ).first()
-        if rec:
+        if rec and rec.team == req.team:
             rec.position = pa.position or ""
 
     db.commit()
