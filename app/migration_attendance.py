@@ -20,9 +20,9 @@ def run_attendance_migration():
         columns_to_add = [
             ("match_time", "VARCHAR(10) DEFAULT '06:30'"),
             ("venue_name", "VARCHAR(100) DEFAULT '서울숲'"),
-            ("venue_lat", "DOUBLE PRECISION DEFAULT 37.5448"),
-            ("venue_lng", "DOUBLE PRECISION DEFAULT 127.0378"),
-            ("venue_radius", "INTEGER DEFAULT 200"),
+            ("venue_lat", "DOUBLE PRECISION DEFAULT 37.546220"),
+            ("venue_lng", "DOUBLE PRECISION DEFAULT 127.040813"),
+            ("venue_radius", "INTEGER DEFAULT 100"),
         ]
         for col_name, col_def in columns_to_add:
             try:
@@ -44,6 +44,20 @@ def run_attendance_migration():
                 print(f"      ↻ 기존 경기 {updated}개 시간을 06:30으로 업데이트")
         except Exception as e:
             print(f"      ⚠️  시간 보정 스킵: {e}")
+
+        # 1-2. 기본 좌표/반경 보정: 이전 좌표로 저장된 경기 → 정확한 좌표로 업데이트
+        # (이전 버전 37.5448, 127.0378, 200m → 37.546220, 127.040813, 100m)
+        try:
+            result = conn.execute(text("""
+                UPDATE matches
+                SET venue_lat=37.546220, venue_lng=127.040813, venue_radius=100
+                WHERE venue_lat=37.5448 AND venue_lng=127.0378;
+            """))
+            updated = result.rowcount or 0
+            if updated > 0:
+                print(f"      ↻ 기존 경기 {updated}개 좌표/반경을 새 값으로 업데이트")
+        except Exception as e:
+            print(f"      ⚠️  좌표 보정 스킵: {e}")
 
         # 2. attendance_checks 테이블 생성
         print("   📍 attendance_checks 테이블 생성...")
