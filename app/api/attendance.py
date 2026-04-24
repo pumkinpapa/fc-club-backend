@@ -185,9 +185,9 @@ async def check_in(
         )
 
     # 거리 계산
-    venue_lat = match.venue_lat or 37.5448
-    venue_lng = match.venue_lng or 127.0378
-    venue_radius = match.venue_radius or 200
+    venue_lat = match.venue_lat or 37.546220
+    venue_lng = match.venue_lng or 127.040813
+    venue_radius = match.venue_radius or 100
     distance = calculate_distance(req.latitude, req.longitude, venue_lat, venue_lng)
 
     # 반경 체크
@@ -262,9 +262,9 @@ async def get_my_status(
             "match_date": match.match_date.isoformat(),
             "match_time": match.match_time or "06:30",
             "venue_name": match.venue_name or "서울숲",
-            "venue_lat": match.venue_lat or 37.5448,
-            "venue_lng": match.venue_lng or 127.0378,
-            "venue_radius": match.venue_radius or 200,
+            "venue_lat": match.venue_lat or 37.546220,
+            "venue_lng": match.venue_lng or 127.040813,
+            "venue_radius": match.venue_radius or 100,
         }
 
     return {
@@ -425,8 +425,8 @@ async def manual_check_in(
         match_id=req.match_id,
         member_id=req.member_id,
         check_time=datetime.now(),
-        latitude=match.venue_lat or 37.5448,
-        longitude=match.venue_lng or 127.0378,
+        latitude=match.venue_lat or 37.546220,
+        longitude=match.venue_lng or 127.040813,
         accuracy_meters=0,
         distance_meters=0,
         status=req.status,
