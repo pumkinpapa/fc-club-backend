@@ -61,10 +61,12 @@ class CreateReservationRequest(BaseModel):
     date: str = Field(..., description="YYYY-MM-DD")
     time_slot: str = Field(..., description="예: '08-10'")
     court_name: str = Field(default=DEFAULT_COURT_NAME, max_length=100)
+    reserver_id: int | None = Field(default=None, description="시스템관리자 전용 - 다른 회원 대신 예약")
 
 
 class UpdateReservationRequest(BaseModel):
     court_name: str = Field(..., max_length=100)
+    reserver_id: int | None = Field(default=None, description="시스템관리자 전용 - 예약자 변경")
 
 
 # ============================================================
@@ -140,6 +142,16 @@ async def create_reservation(
     if not court_name:
         court_name = DEFAULT_COURT_NAME
 
+    # ★ 예약자 결정 (시스템관리자가 다른 회원 지정한 경우 지원)
+    reserver = current_user
+    if req.reserver_id is not None and req.reserver_id != current_user.id:
+        if not is_sys_admin(current_user):
+            raise HTTPException(status_code=403, detail="시스템관리자만 다른 회원으로 예약할 수 있습니다.")
+        target_member = db.query(Member).filter(Member.id == req.reserver_id).first()
+        if not target_member:
+            raise HTTPException(status_code=404, detail="지정한 회원을 찾을 수 없습니다.")
+        reserver = target_member
+
     existing = db.query(CourtReservation).filter(
         CourtReservation.date == target_date,
         CourtReservation.time_slot == req.time_slot,
@@ -153,8 +165,8 @@ async def create_reservation(
     new_res = CourtReservation(
         date=target_date,
         time_slot=req.time_slot,
-        reserver_id=current_user.id,
-        reserver_name=current_user.name,
+        reserver_id=reserver.id,
+        reserver_name=reserver.name,
         court_name=court_name,
     )
     db.add(new_res)
@@ -183,12 +195,13 @@ async def update_reservation(
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
-    """구장 이름만 수정 가능. 본인 예약만."""
+    """구장 이름만 수정 가능. 본인 + 시스템관리자."""
     res = db.query(CourtReservation).filter(CourtReservation.id == reservation_id).first()
     if not res:
         raise HTTPException(status_code=404, detail="예약 정보를 찾을 수 없습니다.")
 
-    if res.reserver_id != current_user.id:
+    # 본인 또는 시스템관리자만 수정 가능
+    if res.reserver_id != current_user.id and not is_sys_admin(current_user):
         raise HTTPException(status_code=403, detail="본인의 예약만 수정할 수 있습니다.")
 
     if res.date < date.today():
@@ -198,6 +211,17 @@ async def update_reservation(
     if not court_name:
         court_name = DEFAULT_COURT_NAME
     res.court_name = court_name
+
+    # ★ 예약자 변경 (시스템관리자 전용)
+    if req.reserver_id is not None and req.reserver_id != res.reserver_id:
+        if not is_sys_admin(current_user):
+            raise HTTPException(status_code=403, detail="시스템관리자만 예약자를 변경할 수 있습니다.")
+        target_member = db.query(Member).filter(Member.id == req.reserver_id).first()
+        if not target_member:
+            raise HTTPException(status_code=404, detail="지정한 회원을 찾을 수 없습니다.")
+        res.reserver_id = target_member.id
+        res.reserver_name = target_member.name
+
     db.commit()
     db.refresh(res)
 
