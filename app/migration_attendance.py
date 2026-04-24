@@ -18,7 +18,7 @@ def run_attendance_migration():
 
         # PostgreSQL은 ADD COLUMN IF NOT EXISTS 지원
         columns_to_add = [
-            ("match_time", "VARCHAR(10) DEFAULT '08:00'"),
+            ("match_time", "VARCHAR(10) DEFAULT '06:30'"),
             ("venue_name", "VARCHAR(100) DEFAULT '서울숲'"),
             ("venue_lat", "DOUBLE PRECISION DEFAULT 37.5448"),
             ("venue_lng", "DOUBLE PRECISION DEFAULT 127.0378"),
@@ -32,6 +32,18 @@ def run_attendance_migration():
                 print(f"      ✓ {col_name}")
             except Exception as e:
                 print(f"      ⚠️  {col_name} 추가 실패 (이미 있음?): {e}")
+
+        # 1-1. 기본 시간 보정: 08:00으로 저장된 경기 → 06:30으로 일회성 업데이트
+        # (이전 버전에서 08:00으로 마이그레이션된 기존 경기 보정)
+        try:
+            result = conn.execute(text(
+                "UPDATE matches SET match_time='06:30' WHERE match_time='08:00';"
+            ))
+            updated = result.rowcount or 0
+            if updated > 0:
+                print(f"      ↻ 기존 경기 {updated}개 시간을 06:30으로 업데이트")
+        except Exception as e:
+            print(f"      ⚠️  시간 보정 스킵: {e}")
 
         # 2. attendance_checks 테이블 생성
         print("   📍 attendance_checks 테이블 생성...")
