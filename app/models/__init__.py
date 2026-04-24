@@ -94,3 +94,21 @@ class MatchRecord(Base):
 
     def __repr__(self):
         return f"<MatchRecord(match={self.match_id}, member={self.member_id}, att={self.attendance})>"
+
+# ============================================================
+# 🏟️ 구장 예약 (신규)
+# ============================================================
+class CourtReservation(Base):
+    __tablename__ = "court_reservations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date, nullable=False, index=True)
+    time_slot = Column(String(20), nullable=False)
+    reserver_id = Column(Integer, ForeignKey("members.id", ondelete="CASCADE"), nullable=False)
+    reserver_name = Column(String(50), nullable=False)
+    court_name = Column(String(100), nullable=False, default="서울숲")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("date", "time_slot", name="uq_reservation_date_slot"),
+    )
