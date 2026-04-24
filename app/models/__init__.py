@@ -62,8 +62,8 @@ class Match(Base):
     # ★ GPS 지각 체크용 신규 필드
     match_time = Column(String(10), default="06:30")
     venue_name = Column(String(100), default="서울숲")
-    venue_lat = Column(Float, default=37.5464)
-    venue_lng = Column(Float, default=127.0407)
+    venue_lat = Column(Float, default=37.546220)
+    venue_lng = Column(Float, default=127.040813)
     venue_radius = Column(Integer, default=100)
 
     def __repr__(self):
