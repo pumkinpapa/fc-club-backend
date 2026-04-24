@@ -37,6 +37,15 @@ def is_sys_admin(user: Member) -> bool:
     return user.phone == SYS_ADMIN_PHONE
 
 
+def is_admin_user(user: Member) -> bool:
+    """관리자 권한: 회장/총무/관리자 또는 시스템관리자"""
+    if user.phone == SYS_ADMIN_PHONE:
+        return True
+    if user.role in ("회장", "관리자", "총무"):
+        return True
+    return False
+
+
 def calculate_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> int:
     """두 GPS 좌표 간 거리(미터) - Haversine 공식"""
     R = 6371000  # 지구 반지름(m)
@@ -345,9 +354,9 @@ async def update_attendance(
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
-    """관리자 수동 수정 (시스템관리자만)"""
-    if not is_sys_admin(current_user):
-        raise HTTPException(status_code=403, detail="시스템관리자만 수정할 수 있습니다.")
+    """관리자 수동 수정 (관리자/시스템관리자)"""
+    if not is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="관리자만 수정할 수 있습니다.")
 
     check = db.query(AttendanceCheck).filter(AttendanceCheck.id == check_id).first()
     if not check:
@@ -370,9 +379,9 @@ async def delete_attendance(
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
-    """관리자 삭제 (시스템관리자만)"""
-    if not is_sys_admin(current_user):
-        raise HTTPException(status_code=403, detail="시스템관리자만 삭제할 수 있습니다.")
+    """관리자 삭제 (관리자/시스템관리자)"""
+    if not is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="관리자만 삭제할 수 있습니다.")
 
     check = db.query(AttendanceCheck).filter(AttendanceCheck.id == check_id).first()
     if not check:
@@ -389,9 +398,9 @@ async def manual_check_in(
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
-    """관리자가 GPS 실패한 회원 대신 체크인 (시스템관리자만)"""
-    if not is_sys_admin(current_user):
-        raise HTTPException(status_code=403, detail="시스템관리자만 가능합니다.")
+    """관리자가 GPS 실패한 회원 대신 체크인 (관리자/시스템관리자)"""
+    if not is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="관리자만 가능합니다.")
 
     match = db.query(Match).filter(Match.id == req.match_id).first()
     if not match:
