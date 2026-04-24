@@ -54,7 +54,7 @@ def judge_check_in(match: Match, check_time: datetime) -> tuple:
     """
     # 경기 시작 시간 파싱
     try:
-        hour, minute = map(int, (match.match_time or "08:00").split(":"))
+        hour, minute = map(int, (match.match_time or "06:30").split(":"))
     except Exception:
         hour, minute = 8, 0
 
@@ -251,7 +251,7 @@ async def get_my_status(
             "checked_in": False,
             "match_exists": True,
             "match_date": match.match_date.isoformat(),
-            "match_time": match.match_time or "08:00",
+            "match_time": match.match_time or "06:30",
             "venue_name": match.venue_name or "서울숲",
             "venue_lat": match.venue_lat or 37.5448,
             "venue_lng": match.venue_lng or 127.0378,
@@ -326,7 +326,7 @@ async def get_match_attendance(
     return {
         "match_id": match_id,
         "match_date": match.match_date.isoformat(),
-        "match_time": match.match_time or "08:00",
+        "match_time": match.match_time or "06:30",
         "venue_name": match.venue_name or "서울숲",
         "summary": {
             "ontime": ontime_count,
