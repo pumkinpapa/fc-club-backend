@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, Integer, String, Date, DateTime, Enum, ForeignKey, UniqueConstraint, Text
+    Column, Integer, String, Date, DateTime, Enum, ForeignKey, UniqueConstraint, Text, Float
 )
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -59,6 +59,13 @@ class Match(Base):
     # ★ 신규 추가
     formations = Column(Text, default="")  # 팀별 포메이션 JSON. ex: {"1팀":"2-3-1","2팀":"3-2-1"}
 
+    # ★ GPS 지각 체크용 신규 필드
+    match_time = Column(String(10), default="06:30")
+    venue_name = Column(String(100), default="서울숲")
+    venue_lat = Column(Float, default=37.5464)
+    venue_lng = Column(Float, default=127.0407)
+    venue_radius = Column(Integer, default=100)
+
     def __repr__(self):
         return f"<Match(id={self.id}, date={self.match_date}, status={self.status})>"
 
@@ -111,4 +118,34 @@ class CourtReservation(Base):
 
     __table_args__ = (
         UniqueConstraint("date", "time_slot", name="uq_reservation_date_slot"),
+    )
+
+# ============================================================
+# 📍 GPS 출석 체크 (신규)
+# ============================================================
+class AttendanceCheck(Base):
+    __tablename__ = "attendance_checks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    match_id = Column(Integer, ForeignKey("matches.id", ondelete="CASCADE"), nullable=False)
+    member_id = Column(Integer, ForeignKey("members.id", ondelete="CASCADE"), nullable=False)
+
+    # 체크인 정보
+    check_time = Column(DateTime, nullable=False)
+    latitude = Column(Float, nullable=False)
+    longitude = Column(Float, nullable=False)
+    accuracy_meters = Column(Float)
+    distance_meters = Column(Integer, nullable=False)
+
+    # 판정 결과
+    status = Column(String(20), nullable=False)  # "정시" | "지각"
+    late_minutes = Column(Integer, default=0)
+
+    # 로그
+    check_method = Column(String(20), default="auto")  # "auto" | "admin"
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("match_id", "member_id", name="uq_attendance_match_member"),
     )
