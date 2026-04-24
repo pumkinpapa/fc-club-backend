@@ -5,12 +5,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.database import init_db, SessionLocal
-from app.api import auth, members, matches, rankings
+from app.api import auth, members, matches, rankings, reservations
 from app.services.scheduler import start_scheduler, stop_scheduler
 from app.core.init_admin import create_initial_admin
 from app.migration_positions import run_position_migration
 run_position_migration()  # ★ 앱 시작 시 자동 실행
-
+from app.migration_reservations import run_reservation_migration
+run_reservation_migration()  # ★ 구장 예약 테이블 생성
 
 settings = get_settings()
 
@@ -42,7 +43,7 @@ app.include_router(auth.router)
 app.include_router(members.router)
 app.include_router(matches.router)
 app.include_router(rankings.router)
-
+app.include_router(reservations.router)
 
 @app.get("/")
 async def root():
