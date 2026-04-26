@@ -71,6 +71,30 @@ async def get_next_match(
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
+    """
+    이번 주 경기 반환.
+
+    [개선된 로직]
+    - 미확정 경기(확정완료가 아닌 모든 상태)가 있으면 가장 오래된 것 우선 반환
+      → 투표중 / 편성완료 / 경기완료 상태의 경기를 모두 처리하기 전에는
+        새 경기를 자동 생성하지 않음
+    - 모든 경기가 확정완료 상태인 경우에만 다음 일요일 경기 자동 생성
+      → 첫 사용이나 모든 경기가 마무리된 상태에서만 새 경기 생성
+    - 평소에는 confirm_result()에서 결과 확정 시점에 다음 경기가 생성됨
+
+    이전 로직의 문제점:
+    - get_or_create_match()가 항상 호출되어 누군가 앱을 열 때마다
+      자동으로 다음 일요일 경기가 생성됨 (특히 일요일 당일 +7일 점프 발생)
+    """
+    # 1. 미확정 경기 우선 반환 (가장 오래된 것부터)
+    unconfirmed = db.query(Match).filter(
+        Match.status != "확정완료"
+    ).order_by(Match.match_date).first()
+
+    if unconfirmed:
+        return MatchResponse.model_validate(unconfirmed)
+
+    # 2. 모든 경기가 확정완료 상태인 경우만 새로운 경기 자동 생성
     match_date = get_next_match_date(settings.match_day_of_week)
     match = get_or_create_match(db, match_date)
     return MatchResponse.model_validate(match)
