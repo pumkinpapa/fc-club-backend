@@ -687,6 +687,43 @@ async def set_vote_endpoint(
     return {"message": f"투표가 '{req.attendance}'(으)로 변경되었습니다."}
 
 
+@router.delete("/{match_id}/votes/reset")
+async def reset_all_votes(
+    match_id: int,
+    db: Session = Depends(get_db),
+    sys_admin: Member = Depends(get_system_admin_user),
+):
+    """
+    시스템관리자가 특정 경기의 모든 투표 기록을 초기화
+    
+    - 모든 회원이 '미응답' 상태로 돌아감
+    - 편성 정보도 초기화 (투표중 상태로 전환)
+    - 확정완료된 경기는 초기화 불가
+    """
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
+    
+    if match.status == "확정완료":
+        raise HTTPException(status_code=400, detail="확정완료된 경기는 초기화할 수 없습니다.")
+    
+    # 모든 MatchRecord 삭제
+    deleted_count = db.query(MatchRecord).filter(
+        MatchRecord.match_id == match_id
+    ).delete()
+    
+    # 경기 상태를 투표중으로 되돌리고 편성 정보도 초기화
+    match.status = "투표중"
+    match.formations = ""
+    
+    db.commit()
+    
+    return {
+        "message": f"투표가 모두 초기화되었습니다. ({deleted_count}건 삭제)",
+        "deleted_count": deleted_count,
+    }
+
+
 # ──────────────────────────────────
 # 수동 알림톡 발송 (테스트용)
 # ──────────────────────────────────
