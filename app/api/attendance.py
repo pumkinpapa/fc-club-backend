@@ -11,7 +11,7 @@
 경기 정보 수정:
 - PUT    /api/matches/{id}/settings            -> 경기 시간/경기장 수정 (관리자)
 """
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from math import radians, cos, sin, asin, sqrt
 from typing import List, Optional
 
@@ -27,6 +27,19 @@ from app.models import Member, Match, MatchRecord, AttendanceCheck
 router = APIRouter(prefix="/api/attendance", tags=["출석체크"])
 
 SYS_ADMIN_PHONE = "01000000001"
+
+# ============================================================
+# KST 타임존 헬퍼 (서버는 UTC로 실행되므로 한국 시간 보정 필수)
+# ============================================================
+KST = timezone(timedelta(hours=9))
+
+def get_kst_now() -> datetime:
+    """현재 KST 시각 반환 (naive datetime, 서버가 UTC여도 KST로 보정)"""
+    return datetime.now(KST).replace(tzinfo=None)
+
+def get_kst_today() -> date:
+    """현재 KST 날짜 반환 (서버가 UTC여도 KST로 보정)"""
+    return datetime.now(KST).date()
 
 
 # ============================================================
@@ -169,8 +182,8 @@ async def check_in(
     if not match:
         raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
 
-    # 오늘 경기인지 체크 (지난/미래 경기 방지)
-    if match.match_date != date.today():
+    # 오늘 경기인지 체크 (KST 기준, 지난/미래 경기 방지)
+    if match.match_date != get_kst_today():
         raise HTTPException(status_code=400, detail="오늘 경기만 체크인 가능합니다.")
 
     # 이미 체크인했는지 확인
@@ -197,8 +210,8 @@ async def check_in(
             detail=f"경기장에서 {distance}m 떨어져 있습니다. ({venue_radius}m 이내에서 체크인해주세요)"
         )
 
-    # 시간 판정 (서버 시간 기준)
-    now = datetime.now()
+    # 시간 판정 (KST 기준)
+    now = get_kst_now()
     status, late_minutes = judge_check_in(match, now)
 
     # 저장
@@ -424,7 +437,7 @@ async def manual_check_in(
     new_check = AttendanceCheck(
         match_id=req.match_id,
         member_id=req.member_id,
-        check_time=datetime.now(),
+        check_time=get_kst_now(),
         latitude=match.venue_lat or 37.546220,
         longitude=match.venue_lng or 127.040813,
         accuracy_meters=0,
