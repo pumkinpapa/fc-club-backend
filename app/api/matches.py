@@ -261,7 +261,7 @@ async def submit_result(
     match_id: int,
     req: ResultRequest,
     db: Session = Depends(get_db),
-    admin: Member = Depends(get_admin_user),
+    current_user: Member = Depends(get_current_user),
 ):
     try:
         match = record_result(db, match_id, req.winning_team)
@@ -284,9 +284,9 @@ async def submit_three_team_result(
     match_id: int,
     req: ThreeTeamResultRequest,
     db: Session = Depends(get_db),
-    admin: Member = Depends(get_admin_user),
+    current_user: Member = Depends(get_current_user),
 ):
-    """3팀 경기 결과 기록 (관리자 전용)"""
+    """3팀 경기 결과 기록 (전체 회원)"""
     # rankings의 값이 int인지 검증
     rankings = {}
     try:
