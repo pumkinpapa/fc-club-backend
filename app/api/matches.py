@@ -166,6 +166,7 @@ async def get_votes(
             attendance=r.attendance,
             duty=r.duty,
             team=r.team,
+            position=r.position or "",  # ★ 포메이션 포지션 복원용
             match_result=r.match_result,
         )
 
