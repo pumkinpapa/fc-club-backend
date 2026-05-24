@@ -186,10 +186,10 @@ async def get_votes(
 async def assign_teams(
     match_id: int,
     db: Session = Depends(get_db),
-    admin: Member = Depends(get_admin_user),
+    current_user: Member = Depends(get_current_user),
     num_teams: Optional[int] = Query(None, description="2 또는 3 (미지정 시 자동)"),
 ):
-    """팀 편성 및 역할 배정 (관리자 전용)
+    """팀 편성 및 역할 배정 (전체 회원)
     - num_teams 쿼리 파라미터로 2팀/3팀 선택 가능
     - 미지정 시 18명 이상이면 3팀, 그 외 2팀 자동
     """
@@ -424,7 +424,7 @@ async def update_match_teams(
     match_id: int,
     req: TeamUpdateRequest,
     db: Session = Depends(get_db),
-    admin: Member = Depends(get_admin_user),
+    current_user: Member = Depends(get_current_user),
 ):
     try:
         match = update_teams(
@@ -671,10 +671,10 @@ async def set_vote_endpoint(
     match_id: int,
     req: SetVoteRequest,
     db: Session = Depends(get_db),
-    sys_admin: Member = Depends(get_system_admin_user),
+    admin: Member = Depends(get_admin_user),
 ):
     """
-    시스템관리자가 특정 회원의 투표 상태를 대신 변경 (드래그앤드롭 UI용)
+    관리자/시스템관리자가 특정 회원의 투표 상태를 대신 변경 (드래그앤드롭 UI용)
 
     - attendance: "참석" / "불참" / "미응답"
     - "미응답"이면 MatchRecord 삭제 (투표 초기화)
