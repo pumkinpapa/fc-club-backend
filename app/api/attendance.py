@@ -200,14 +200,14 @@ async def check_in(
     # 거리 계산
     venue_lat = match.venue_lat or 37.546220
     venue_lng = match.venue_lng or 127.040813
-    venue_radius = match.venue_radius or 100
+    venue_radius = match.venue_radius or 300  # ★ 기본 300m (GPS 오차 고려)
     distance = calculate_distance(req.latitude, req.longitude, venue_lat, venue_lng)
 
     # 반경 체크
     if distance > venue_radius:
         raise HTTPException(
             status_code=400,
-            detail=f"경기장에서 {distance}m 떨어져 있습니다. ({venue_radius}m 이내에서 체크인해주세요)"
+            detail=f"경기장 반경 밖입니다. (현재 {distance}m · 허용 {venue_radius}m 이내) — 구장 좌표가 맞는지 관리자에게 확인하세요"
         )
 
     # 시간 판정 (KST 기준)
