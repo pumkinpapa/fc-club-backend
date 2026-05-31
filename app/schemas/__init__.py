@@ -57,6 +57,12 @@ class MatchResponse(BaseModel):
     status: str
     result_summary: Optional[str] = None
     formations: str | None = ""  # ★ 신규
+    # ★ GPS 체크인 / 경기 UI용
+    match_time: str = "06:30"
+    venue_name: str = "서울숲"
+    venue_lat: float = 37.546220
+    venue_lng: float = 127.040813
+    venue_radius: int = 300  # ★ 기본 300m
 
     class Config:
         from_attributes = True
