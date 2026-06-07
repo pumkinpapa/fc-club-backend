@@ -62,6 +62,6 @@ def get_current_user(
 
 def get_admin_user(current_user=Depends(get_current_user)):
     """관리자 권한 확인 Dependency"""
-    if current_user.role not in ("회장", "관리자"):
+    if current_user.role not in ("회장", "관리자", "총무", "운영진"):
         raise HTTPException(status_code=403, detail="관리자 권한이 필요합니다.")
     return current_user
