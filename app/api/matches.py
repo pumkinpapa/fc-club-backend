@@ -692,11 +692,11 @@ async def set_vote_endpoint(
 async def reset_all_votes(
     match_id: int,
     db: Session = Depends(get_db),
-    sys_admin: Member = Depends(get_system_admin_user),
+    admin: Member = Depends(get_admin_user),
 ):
     """
-    시스템관리자가 특정 경기의 모든 투표 기록을 초기화
-    
+    관리자(회장/총무/운영진/시스템관리자)가 특정 경기의 모든 투표 기록을 초기화
+
     - 모든 회원이 '미응답' 상태로 돌아감
     - 편성 정보도 초기화 (투표중 상태로 전환)
     - 확정완료된 경기는 초기화 불가
