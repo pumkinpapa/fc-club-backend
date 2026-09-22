@@ -1,225 +1,178 @@
 """
-경기 / 투표 / 팀 편성 / 결과 기록 API
+경기/투표/팀편성 비즈니스 로직
 """
 
-from datetime import date
-from typing import List, Optional
+import random
+from datetime import date, timedelta
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
-from app.core.database import get_db
-from app.core.security import get_current_user, get_admin_user
-from app.models import Member, Match, MatchRecord
-from app.schemas import (
-    MatchResponse, VoteRequest, VoteStatusResponse,
-    MatchRecordResponse, MemberResponse,
-    TeamAssignmentResponse, ResultRequest,
-)
-from app.services.match_service import (
-    get_next_match_date, get_or_create_match, vote,
-    get_vote_status, assign_teams_and_duties, record_result,
-    update_teams, update_duties, update_result_members,
-    confirm_result, cancel_confirm, cancel_assignment,
-    delete_match,
-    set_vote_for_member,
-    record_three_team_result,  # ★ 신규: 3팀 경기
-    update_match_date,  # ★ 신규: 경기 날짜 변경
-    THREE_TEAM_MARKER,
-)
-from app.services.solapi_service import send_alimtalk_bulk
-
-settings = get_settings()
-
-router = APIRouter(prefix="/api/matches", tags=["경기관리"])
+from app.models import Match, MatchRecord, Member
 
 
-# 시스템관리자 전화번호
-SYS_ADMIN_PHONE = "01000000001"
+# ──────────────────────────────────────────────
+# 상수
+# ──────────────────────────────────────────────
+
+THREE_TEAM_THRESHOLD = 18  # 18명 이상이면 3팀으로 편성
+THREE_TEAM_MARKER = "[3팀]"  # result_summary에 이 접두사가 있으면 3팀 경기
 
 
-def get_system_admin_user(current_user: Member = Depends(get_current_user)) -> Member:
-    """시스템관리자 권한 확인"""
-    if current_user.phone != SYS_ADMIN_PHONE:
-        raise HTTPException(status_code=403, detail="시스템관리자만 수행 가능합니다.")
-    return current_user
+def is_three_team_match(match: Match) -> bool:
+    """Match가 3팀 경기인지 판별 (result_summary 기반)"""
+    return bool(match.result_summary and match.result_summary.startswith(THREE_TEAM_MARKER))
 
 
-# ──────────────────────────────────
-# 경기 조회
-# ──────────────────────────────────
+# ──────────────────────────────────────────────
+# 기존 함수들
+# ──────────────────────────────────────────────
 
-@router.get("/", response_model=List[MatchResponse])
-async def list_matches(
-    db: Session = Depends(get_db),
-    current_user: Member = Depends(get_current_user),
-    limit: int = Query(20, ge=1, le=100),
-):
-    matches = (
-        db.query(Match)
-        .order_by(Match.match_date.desc())
-        .limit(limit)
-        .all()
-    )
-    return [MatchResponse.model_validate(m) for m in matches]
+def get_next_match_date(match_day: int = 6) -> date:
+    today = date.today()
+    days_ahead = match_day - today.weekday()
+    if days_ahead <= 0:
+        days_ahead += 7
+    return today + timedelta(days=days_ahead)
 
 
-@router.get("/next", response_model=MatchResponse)
-async def get_next_match(
-    db: Session = Depends(get_db),
-    current_user: Member = Depends(get_current_user),
-):
-    """
-    이번 주 경기 반환.
-
-    [개선된 로직]
-    - 미확정 경기(확정완료가 아닌 모든 상태)가 있으면 가장 오래된 것 우선 반환
-      → 투표중 / 편성완료 / 경기완료 상태의 경기를 모두 처리하기 전에는
-        새 경기를 자동 생성하지 않음
-    - 모든 경기가 확정완료 상태인 경우에만 다음 일요일 경기 자동 생성
-      → 첫 사용이나 모든 경기가 마무리된 상태에서만 새 경기 생성
-    - 평소에는 confirm_result()에서 결과 확정 시점에 다음 경기가 생성됨
-
-    이전 로직의 문제점:
-    - get_or_create_match()가 항상 호출되어 누군가 앱을 열 때마다
-      자동으로 다음 일요일 경기가 생성됨 (특히 일요일 당일 +7일 점프 발생)
-    """
-    # 1. 미확정 경기 우선 반환 (가장 오래된 것부터)
-    unconfirmed = db.query(Match).filter(
-        Match.status != "확정완료"
-    ).order_by(Match.match_date).first()
-
-    if unconfirmed:
-        return MatchResponse.model_validate(unconfirmed)
-
-    # 2. 모든 경기가 확정완료 상태인 경우만 새로운 경기 자동 생성
-    match_date = get_next_match_date(settings.match_day_of_week)
-    match = get_or_create_match(db, match_date)
-    return MatchResponse.model_validate(match)
-
-
-@router.get("/{match_id}", response_model=MatchResponse)
-async def get_match(
-    match_id: int,
-    db: Session = Depends(get_db),
-    current_user: Member = Depends(get_current_user),
-):
-    match = db.query(Match).filter(Match.id == match_id).first()
+def get_or_create_match(db: Session, match_date: date) -> Match:
+    match = db.query(Match).filter(Match.match_date == match_date).first()
     if not match:
-        raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
-    return MatchResponse.model_validate(match)
+        match = Match(match_date=match_date, status="투표중")
+        db.add(match)
+        db.commit()
+        db.refresh(match)
+    return match
 
 
-# ──────────────────────────────────
-# 투표
-# ──────────────────────────────────
-
-@router.post("/{match_id}/vote")
-async def submit_vote(
-    match_id: int,
-    req: VoteRequest,
-    db: Session = Depends(get_db),
-    current_user: Member = Depends(get_current_user),
-):
-    match = db.query(Match).filter(Match.id == match_id).first()
-    if not match:
-        raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
-
-    if req.attendance not in ("참석", "불참"):
-        raise HTTPException(status_code=400, detail="참석 또는 불참만 선택 가능합니다.")
-
-    record = vote(db, match_id, current_user.id, req.attendance)
-    return {
-        "message": f"{req.attendance}으로 투표되었습니다.",
-        "record_id": record.id,
-    }
-
-
-@router.get("/{match_id}/votes", response_model=VoteStatusResponse)
-async def get_votes(
-    match_id: int,
-    db: Session = Depends(get_db),
-    current_user: Member = Depends(get_current_user),
-):
-    match = db.query(Match).filter(Match.id == match_id).first()
-    if not match:
-        raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
-
-    status = get_vote_status(db, match)
-
-    my_record = (
+def vote(db: Session, match_id: int, member_id: int, attendance: str) -> MatchRecord:
+    record = (
         db.query(MatchRecord)
-        .filter(MatchRecord.match_id == match_id, MatchRecord.member_id == current_user.id)
+        .filter(MatchRecord.match_id == match_id, MatchRecord.member_id == member_id)
         .first()
     )
+    if record:
+        record.attendance = attendance
+    else:
+        record = MatchRecord(match_id=match_id, member_id=member_id, attendance=attendance)
+        db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
 
-    def record_to_response(r: MatchRecord) -> MatchRecordResponse:
-        member = db.query(Member).filter(Member.id == r.member_id).first()
-        return MatchRecordResponse(
-            id=r.id,
-            match_id=r.match_id,
-            member_id=r.member_id,
-            member_name=member.name if member else "",
-            member_birth=member.birth if member else "",
-            attendance=r.attendance,
-            duty=r.duty,
-            team=r.team,
-            position=r.position or "",  # ★ 포메이션 포지션 복원용
-            match_result=r.match_result,
-        )
 
-    return VoteStatusResponse(
-        match=MatchResponse.model_validate(match),
-        attendees=[record_to_response(r) for r in status["attendees"]],
-        absentees=[record_to_response(r) for r in status["absentees"]],
-        pending=[MemberResponse.model_validate(m) for m in status["pending"]],
-        my_vote=my_record.attendance if my_record else None,
+def set_vote_for_member(
+    db: Session, match_id: int, member_id: int, attendance: str
+) -> Optional[MatchRecord]:
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise ValueError("경기를 찾을 수 없습니다.")
+    if match.status == "확정완료":
+        raise ValueError("확정완료된 경기는 투표를 변경할 수 없습니다.")
+
+    member = db.query(Member).filter(Member.id == member_id).first()
+    if not member:
+        raise ValueError("회원을 찾을 수 없습니다.")
+    if member.status != "승인":
+        raise ValueError("승인된 회원만 투표 대상입니다.")
+
+    if attendance in ("미응답", "", None):
+        db.query(MatchRecord).filter(
+            MatchRecord.match_id == match_id,
+            MatchRecord.member_id == member_id,
+        ).delete(synchronize_session=False)
+        db.commit()
+        return None
+
+    if attendance not in ("참석", "불참"):
+        raise ValueError("참석, 불참, 미응답 중 하나여야 합니다.")
+
+    return vote(db, match_id, member_id, attendance)
+
+
+def get_vote_status(db: Session, match: Match) -> dict:
+    """투표 현황 조회 (승인된 회원만 대상)"""
+    records = db.query(MatchRecord).filter(MatchRecord.match_id == match.id).all()
+    all_members = db.query(Member).filter(Member.status == "승인").all()
+
+    voted_member_ids = {r.member_id for r in records}
+
+    attendees = [r for r in records if r.attendance == "참석"]
+    absentees = [r for r in records if r.attendance == "불참"]
+    pending = [m for m in all_members if m.id not in voted_member_ids]
+
+    return {"attendees": attendees, "absentees": absentees, "pending": pending}
+
+
+def assign_teams_and_duties(db: Session, match_id: int, num_teams: int = None) -> dict:
+    """
+    팀 편성 및 역할 배정
+    - num_teams: 2 또는 3 (관리자가 선택)
+    - num_teams가 None이면 자동: 18명 이상이면 3팀, 그 외는 2팀
+    """
+    records = (
+        db.query(MatchRecord)
+        .filter(MatchRecord.match_id == match_id, MatchRecord.attendance == "참석")
+        .all()
     )
 
+    if len(records) < 3:
+        raise ValueError("최소 3명 이상이 참석해야 팀 편성이 가능합니다.")
 
-# ──────────────────────────────────
-# 팀/역할 편성
-# ──────────────────────────────────
+    # num_teams 결정
+    if num_teams is None:
+        num_teams = 3 if len(records) >= THREE_TEAM_THRESHOLD else 2
+    elif num_teams not in (2, 3):
+        raise ValueError("팀 수는 2 또는 3이어야 합니다.")
+    elif num_teams == 3 and len(records) < 3:
+        raise ValueError("3팀 편성은 최소 3명이 필요합니다.")
 
-@router.post("/{match_id}/assign-teams")
-async def assign_teams(
-    match_id: int,
-    db: Session = Depends(get_db),
-    current_user: Member = Depends(get_current_user),
-    num_teams: Optional[int] = Query(None, description="2 또는 3 (미지정 시 자동)"),
-):
-    """팀 편성 및 역할 배정 (전체 회원)
-    - num_teams 쿼리 파라미터로 2팀/3팀 선택 가능
-    - 미지정 시 18명 이상이면 3팀, 그 외 2팀 자동
-    """
+    shuffled = list(records)
+    random.shuffle(shuffled)
+
+    goal_keepers = shuffled[:2]
+    drink_person = shuffled[2]
+
+    for r in records:
+        r.duty = ""
+    for r in goal_keepers:
+        r.duty = "골대"
+    drink_person.duty = "음료" if drink_person.duty != "골대" else "음료, 골대"
+
+    for i, record in enumerate(shuffled):
+        record.team = f"{(i % num_teams) + 1}팀"
+
+    match = db.query(Match).filter(Match.id == match_id).first()
+    match.status = "편성완료"
+
+    db.commit()
+
+    teams = {}
+    duties = {"골대": [], "음료": []}
+    for r in records:
+        db.refresh(r)
+        member = db.query(Member).filter(Member.id == r.member_id).first()
+        team_name = r.team
+        if team_name not in teams:
+            teams[team_name] = []
+        teams[team_name].append({"member_id": r.member_id, "name": member.name, "duty": r.duty})
+        if "골대" in r.duty:
+            duties["골대"].append(member.name)
+        if "음료" in r.duty:
+            duties["음료"].append(member.name)
+
+    return {"teams": teams, "duties": duties, "num_teams": num_teams}
+
+
+def record_result(db: Session, match_id: int, winning_team: str) -> Match:
+    """경기 결과 기록 (2팀 경기용)"""
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
-        raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
+        raise ValueError("경기를 찾을 수 없습니다.")
 
-    try:
-        result = assign_teams_and_duties(db, match_id, num_teams=num_teams)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    return {
-        "message": f"{result.get('num_teams',2)}팀 편성이 완료되었습니다.",
-        "teams": result["teams"],
-        "duties": result["duties"],
-        "num_teams": result.get("num_teams", 2),
-    }
-
-
-@router.post("/{match_id}/notify-teams")
-async def notify_teams(
-    match_id: int,
-    db: Session = Depends(get_db),
-    admin: Member = Depends(get_admin_user),
-):
-    match = db.query(Match).filter(Match.id == match_id).first()
-    if not match:
-        raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
+    if match.status == "확정완료":
+        raise ValueError("확정완료된 경기는 결과를 변경할 수 없습니다.")
 
     records = (
         db.query(MatchRecord)
@@ -227,1006 +180,436 @@ async def notify_teams(
         .all()
     )
 
-    recipients = []
+    # 3팀 경기 방지
+    teams_present = set(r.team for r in records if r.team)
+    if len(teams_present) >= 3:
+        raise ValueError("3팀 경기는 3팀 결과 입력을 사용해주세요.")
+
     for record in records:
-        member = db.query(Member).filter(Member.id == record.member_id).first()
-        if member and member.phone:
-            duty_text = f"담당: {record.duty}" if record.duty else ""
-            recipients.append({
-                "to": member.phone,
-                "variables": {
-                    "#{이름}": member.name,
-                    "#{경기일}": match.match_date.strftime("%m월 %d일"),
-                    "#{팀}": record.team,
-                    "#{담당}": duty_text,
-                },
-            })
+        if winning_team == "무승부":
+            record.match_result = "무"
+        elif record.team == winning_team:
+            record.match_result = "승"
+        else:
+            record.match_result = "패"
 
-    if recipients:
-        result = await send_alimtalk_bulk(
-            recipients=recipients,
-            template_id=settings.solapi_template_result,
-        )
-        return {"message": f"{len(recipients)}명에게 알림톡 발송 완료", "result": result}
+    match.status = "경기완료"
+    match.result_summary = "무승부" if winning_team == "무승부" else f"{winning_team} 승리"
 
-    return {"message": "발송 대상이 없습니다."}
+    db.commit()
+    db.refresh(match)
+    return match
 
 
-# ──────────────────────────────────
-# 경기 결과
-# ──────────────────────────────────
-
-@router.post("/{match_id}/result")
-async def submit_result(
-    match_id: int,
-    req: ResultRequest,
-    db: Session = Depends(get_db),
-    current_user: Member = Depends(get_current_user),
-):
-    try:
-        match = record_result(db, match_id, req.winning_team)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    return {
-        "message": f"경기 결과가 기록되었습니다: {match.result_summary}",
-        "match": MatchResponse.model_validate(match),
-    }
-
-
-# ★★★ 신규: 3팀 경기 결과 입력 ★★★
-class ThreeTeamResultRequest(BaseModel):
-    rankings: dict  # {"1팀": 1, "2팀": 3, "3팀": 2} 형식
-
-
-@router.post("/{match_id}/result-3team")
-async def submit_three_team_result(
-    match_id: int,
-    req: ThreeTeamResultRequest,
-    db: Session = Depends(get_db),
-    current_user: Member = Depends(get_current_user),
-):
-    """3팀 경기 결과 기록 (전체 회원)"""
-    # rankings의 값이 int인지 검증
-    rankings = {}
-    try:
-        for team, rank in req.rankings.items():
-            rankings[str(team)] = int(rank)
-    except (ValueError, TypeError):
-        raise HTTPException(status_code=400, detail="순위는 1, 2, 3 숫자여야 합니다.")
-
-    try:
-        match = record_three_team_result(db, match_id, rankings)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    return {
-        "message": f"3팀 경기 결과가 기록되었습니다",
-        "match": MatchResponse.model_validate(match),
-    }
-
-
-@router.get("/{match_id}/records", response_model=List[MatchRecordResponse])
-async def get_match_records(
-    match_id: int,
-    db: Session = Depends(get_db),
-    current_user: Member = Depends(get_current_user),
-):
-    records = db.query(MatchRecord).filter(MatchRecord.match_id == match_id).all()
-
-    result = []
-    for r in records:
-        member = db.query(Member).filter(Member.id == r.member_id).first()
-        result.append(MatchRecordResponse(
-            id=r.id,
-            match_id=r.match_id,
-            member_id=r.member_id,
-            member_name=member.name if member else "",
-            member_birth=member.birth if member else "",
-            attendance=r.attendance,
-            duty=r.duty,
-            team=r.team,
-            match_result=r.match_result,
-        ))
-    return result
-
-
-# ══════════════════════════════════════════════
-# ★★★ 신규: 전체 경기 기록 조회 (결과탭 이력용) ★★★
-# ══════════════════════════════════════════════
-
-@router.get("/history/all")
-async def get_all_match_history(
-    db: Session = Depends(get_db),
-    current_user: Member = Depends(get_current_user),
-):
+def record_three_team_result(db: Session, match_id: int, rankings: dict) -> Match:
     """
-    모든 경기 + 각 경기별 참여 기록을 한 번에 조회 (결과탭 전체 이력용)
+    3팀 경기 결과 기록
 
-    - 경기일 내림차순 정렬
-    - 투표중 상태 포함
-    - 각 경기마다 attendees(참석자) 리스트 포함
+    rankings: {"1팀": 1, "2팀": 3, "3팀": 2} 형식
+    - 1위팀 멤버 → match_result="승"
+    - 2위팀 멤버 → match_result="무"
+    - 3위팀 멤버 → match_result="패"
+    result_summary: "[3팀] 1위:1팀 2위:3팀 3위:2팀"
     """
-    matches = (
-        db.query(Match)
-        .order_by(Match.match_date.desc())
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise ValueError("경기를 찾을 수 없습니다.")
+
+    if match.status == "확정완료":
+        raise ValueError("확정완료된 경기는 결과를 변경할 수 없습니다.")
+
+    if not isinstance(rankings, dict):
+        raise ValueError("rankings는 {팀:순위} 형식이어야 합니다.")
+
+    expected_teams = {"1팀", "2팀", "3팀"}
+    if set(rankings.keys()) != expected_teams:
+        raise ValueError(f"3팀 모두({expected_teams})의 순위를 지정해야 합니다.")
+
+    if sorted(rankings.values()) != [1, 2, 3]:
+        raise ValueError("순위는 1, 2, 3이 각각 한 번씩이어야 합니다.")
+
+    rank_to_result = {1: "승", 2: "무", 3: "패"}
+
+    records = (
+        db.query(MatchRecord)
+        .filter(MatchRecord.match_id == match_id, MatchRecord.attendance == "참석")
         .all()
     )
 
-    # 모든 회원을 한 번에 조회해 캐시 (N+1 쿼리 방지)
-    members = {m.id: m for m in db.query(Member).all()}
+    for record in records:
+        team_rank = rankings.get(record.team)
+        if team_rank is None:
+            record.match_result = ""
+        else:
+            record.match_result = rank_to_result[team_rank]
 
-    result = []
-    for match in matches:
+    match.status = "경기완료"
+    team_by_rank = {v: k for k, v in rankings.items()}
+    match.result_summary = (
+        f"{THREE_TEAM_MARKER} 1위:{team_by_rank[1]} 2위:{team_by_rank[2]} 3위:{team_by_rank[3]}"
+    )
+
+    db.commit()
+    db.refresh(match)
+    return match
+
+
+def get_rankings(db: Session) -> list[dict]:
+    """
+    누적 승점 랭킹 계산
+
+    2팀 경기: 승=3점, 무=1점, 패=0점
+    3팀 경기: 1위(승)=3점, 2위(무)=1점, 3위(패)=0점
+    """
+    members = db.query(Member).all()
+    matches_map = {m.id: m for m in db.query(Match).all()}
+
+    stats = {}
+
+    for member in members:
         records = (
             db.query(MatchRecord)
             .filter(
-                MatchRecord.match_id == match.id,
+                MatchRecord.member_id == member.id,
                 MatchRecord.attendance == "참석",
+                MatchRecord.match_result != "",
             )
             .all()
         )
 
-        attendees = []
+        wins = 0
+        draws = 0
+        losses = 0
+        points = 0
+
         for r in records:
-            member = members.get(r.member_id)
-            if not member:
-                continue
-            attendees.append({
-                "member_id": r.member_id,
-                "member_name": member.name,
-                "member_birth": member.birth,
-                "team": r.team or "",
-                "duty": r.duty or "",
-                "match_result": r.match_result or "",
-            })
+            match = matches_map.get(r.match_id)
+            three_team = match and is_three_team_match(match)
 
-        result.append({
-            "id": match.id,
-            "match_date": match.match_date.isoformat() if match.match_date else None,
-            "status": match.status,
-            "result_summary": match.result_summary,
-            "attendees": attendees,
-            "attendee_count": len(attendees),
-        })
+            if r.match_result == "승":
+                wins += 1
+                points += 3
+            elif r.match_result == "무":
+                draws += 1
+                # 2팀 무승부 = 1점, 3팀 2위 = 1점 (동일)
+                points += 1
+            elif r.match_result == "패":
+                losses += 1
+                # 2팀 패배 = 0점, 3팀 3위 = 0점 (동일)
+                points += 0
 
-    return {"matches": result, "total": len(result)}
+        played = wins + draws + losses
 
+        if played > 0:
+            stats[member.id] = {
+                "member_id": member.id,
+                "name": member.name,
+                "played": played,
+                "wins": wins,
+                "draws": draws,
+                "losses": losses,
+                "points": points,
+                "attendance_count": len(records),
+            }
 
-# ══════════════════════════════════════════════
-# 팀/담당자/결과 수정 API
-# ══════════════════════════════════════════════
+    ranked = sorted(stats.values(), key=lambda x: (x["points"], x["wins"]), reverse=True)
 
-class TeamAssignmentItem(BaseModel):
-    member_id: int
-    team: str
+    for i, entry in enumerate(ranked):
+        entry["rank"] = i + 1
 
-
-class TeamUpdateRequest(BaseModel):
-    assignments: List[TeamAssignmentItem]
-
-
-class DutyItem(BaseModel):
-    member_id: int
-    duty: str
-
-
-class DutyUpdateRequest(BaseModel):
-    duties: List[DutyItem]
-
-
-class ResultMemberUpdateRequest(BaseModel):
-    additions: List[TeamAssignmentItem] = []
-    removals: List[int] = []
-
-
-@router.put("/{match_id}/teams")
-async def update_match_teams(
-    match_id: int,
-    req: TeamUpdateRequest,
-    db: Session = Depends(get_db),
-    current_user: Member = Depends(get_current_user),
-):
-    try:
-        match = update_teams(
-            db, match_id, [a.model_dump() for a in req.assignments]
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    return {"message": "팀 편성이 저장되었습니다.", "match": MatchResponse.model_validate(match)}
-
-
-@router.put("/{match_id}/duties")
-async def update_match_duties(
-    match_id: int,
-    req: DutyUpdateRequest,
-    db: Session = Depends(get_db),
-    sys_admin: Member = Depends(get_system_admin_user),
-):
-    try:
-        update_duties(db, match_id, [d.model_dump() for d in req.duties])
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"message": "담당자가 저장되었습니다."}
-
-
-@router.put("/{match_id}/result-members")
-async def update_match_result_members(
-    match_id: int,
-    req: ResultMemberUpdateRequest,
-    db: Session = Depends(get_db),
-    admin: Member = Depends(get_admin_user),
-):
-    try:
-        update_result_members(
-            db, match_id,
-            [a.model_dump() for a in req.additions],
-            req.removals,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"message": "결과가 수정되었습니다."}
-
-
-@router.post("/{match_id}/confirm")
-async def confirm_match_result(
-    match_id: int,
-    db: Session = Depends(get_db),
-    admin: Member = Depends(get_admin_user),
-):
-    """경기결과 확정 (관리자 전용). 확정 즉시 다음 주 경기 자동 생성 → 투표 시작."""
-    try:
-        match = confirm_result(db, match_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    return {
-        "message": "경기 결과가 확정되었습니다. 다음 주 경기 투표가 시작되었습니다.",
-        "match": MatchResponse.model_validate(match),
-    }
-
-
-@router.post("/{match_id}/cancel-confirm")
-async def cancel_match_confirm(
-    match_id: int,
-    db: Session = Depends(get_db),
-    sys_admin: Member = Depends(get_system_admin_user),
-):
-    try:
-        match = cancel_confirm(db, match_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"message": "확정이 취소되었습니다.", "match": MatchResponse.model_validate(match)}
-
-
-@router.post("/{match_id}/cancel-assign")
-async def cancel_match_assignment(
-    match_id: int,
-    db: Session = Depends(get_db),
-    sys_admin: Member = Depends(get_system_admin_user),
-):
-    try:
-        match = cancel_assignment(db, match_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"message": "편성이 취소되었습니다.", "match": MatchResponse.model_validate(match)}
+    return ranked
 
 
 # ══════════════════════════════════════════════
-# ★★★ 신규: 경기 완전 삭제 (시스템관리자) ★★★
+# 팀/담당자/결과 수정
 # ══════════════════════════════════════════════
 
-@router.delete("/{match_id}")
-async def delete_match_endpoint(
-    match_id: int,
-    db: Session = Depends(get_db),
-    sys_admin: Member = Depends(get_system_admin_user),
-):
-    """
-    경기 완전 삭제 (시스템관리자 전용)
-    """
-    try:
-        delete_match(db, match_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"message": "경기가 삭제되었습니다."}
+def _parse_winning_team(match: Match) -> Optional[str]:
+    """승리팀(1위) 추출 - 2팀/3팀 공용"""
+    if not match.result_summary or match.result_summary == "무승부":
+        return None
+    if is_three_team_match(match):
+        try:
+            after = match.result_summary.split("1위:")[1]
+            return after.split(" ")[0]
+        except (IndexError, AttributeError):
+            return None
+    return match.result_summary.replace(" 승리", "").strip()
 
 
-# ══════════════════════════════════════════════
-# ★★★ 신규: 경기 날짜 변경 (관리자) ★★★
-# ══════════════════════════════════════════════
-
-class UpdateMatchDateRequest(BaseModel):
-    new_date: str  # ISO 형식 "2026-05-03"
-
-
-@router.put("/{match_id}/date")
-async def change_match_date(
-    match_id: int,
-    req: UpdateMatchDateRequest,
-    db: Session = Depends(get_db),
-    admin: Member = Depends(get_admin_user),
-):
-    """
-    경기 날짜 변경 (관리자 전용)
-
-    - new_date: "YYYY-MM-DD" 형식
-    - 과거 날짜로 변경 불가
-    - 확정완료된 경기는 변경 불가
-    - 같은 날짜에 다른 경기가 이미 있으면 거부
-    - 투표/팀편성/결과 데이터는 모두 유지됨
-    """
-    try:
-        new_date = date.fromisoformat(req.new_date)
-    except (ValueError, TypeError):
-        raise HTTPException(
-            status_code=400,
-            detail="날짜 형식이 올바르지 않습니다. (YYYY-MM-DD)",
-        )
-
-    try:
-        match = update_match_date(db, match_id, new_date)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    return {
-        "message": f"경기 날짜가 {new_date.isoformat()}로 변경되었습니다.",
-        "match": MatchResponse.model_validate(match),
-    }
+def _get_three_team_rankings(match: Match) -> Optional[dict]:
+    """3팀 경기의 {팀: 순위} 딕셔너리 반환"""
+    if not is_three_team_match(match):
+        return None
+    result = {}
+    for rank_num in (1, 2, 3):
+        try:
+            after = match.result_summary.split(f"{rank_num}위:")[1]
+            team = after.split(" ")[0]
+            result[team] = rank_num
+        except (IndexError, AttributeError):
+            return None
+    return result
 
 
-# ══════════════════════════════════════════════
-# ★★★ 신규: 시스템관리자의 대리 투표 변경 ★★★
-# ══════════════════════════════════════════════
-
-class SetVoteRequest(BaseModel):
-    member_id: int
-    attendance: str  # "참석" | "불참" | "미응답"
-
-
-# ══════════════════════════════════════════════
-# ★★★ 신규: 편성 포지션 업데이트 (관리자) ★★★
-# ══════════════════════════════════════════════
-
-class PositionAssignment(BaseModel):
-    member_id: int
-    position: str  # "ST", "CM", "CB", "GK" 등. 빈 문자열이면 벤치
-
-
-class UpdateFormationRequest(BaseModel):
-    team: str  # "1팀", "2팀", "3팀"
-    formation: str  # "2-3-1" or "3-2-1"
-    positions: list[PositionAssignment]
-
-
-@router.put("/{match_id}/formation")
-async def update_formation(
-    match_id: int,
-    req: UpdateFormationRequest,
-    db: Session = Depends(get_db),
-    current_user: Member = Depends(get_current_user),
-):
-    """
-    팀별 포메이션 + 개인별 포지션 업데이트
-
-    권한:
-    - 시스템관리자: 모든 팀 수정 가능
-    - 일반 회원/일반 관리자: 본인이 속한 팀만 수정 가능
-    - 본인 팀 미소속: 수정 불가
-
-    - team: 어떤 팀의 포메이션을 수정할지
-    - formation: "2-3-1" 또는 "3-2-1"
-    - positions: 각 회원별 포지션 배정
-    """
+def update_teams(db: Session, match_id: int, assignments: list[dict]) -> Match:
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
-        raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
-
+        raise ValueError("경기를 찾을 수 없습니다.")
     if match.status == "확정완료":
-        raise HTTPException(status_code=400, detail="확정완료된 경기는 수정할 수 없습니다.")
+        raise ValueError("확정완료된 경기는 수정할 수 없습니다.")
+    if match.status == "투표중":
+        raise ValueError("먼저 팀 편성을 완료해주세요.")
 
-    # ★ 권한 체크: 시스템관리자가 아니면 본인이 해당 팀(req.team)에 속해 있는지 확인
-    is_sys_admin = current_user.phone == SYS_ADMIN_PHONE
-    if not is_sys_admin:
-        my_record = db.query(MatchRecord).filter(
-            MatchRecord.match_id == match_id,
-            MatchRecord.member_id == current_user.id,
-        ).first()
-        if not my_record or my_record.team != req.team:
-            raise HTTPException(
-                status_code=403,
-                detail=f"{req.team} 포메이션은 해당 팀 소속원만 수정할 수 있습니다."
-            )
+    winning_team = _parse_winning_team(match)
+    is_draw = match.result_summary == "무승부"
+    result_recorded = match.status == "경기완료"
+    three_team = is_three_team_match(match)
+    three_rankings = _get_three_team_rankings(match) if three_team else None
+    rank_to_result = {1: "승", 2: "무", 3: "패"}
 
-    # 팀별 포메이션 저장 (Match.formations JSON 필드에)
-    import json
-    formations = {}
-    if match.formations:
-        try:
-            formations = json.loads(match.formations)
-        except Exception:
-            formations = {}
-    formations[req.team] = req.formation
-    match.formations = json.dumps(formations, ensure_ascii=False)
-
-    # 회원별 포지션 업데이트 (요청한 팀의 소속원만)
-    for pa in req.positions:
-        rec = db.query(MatchRecord).filter(
-            MatchRecord.match_id == match_id,
-            MatchRecord.member_id == pa.member_id,
-        ).first()
-        if rec and rec.team == req.team:
-            rec.position = pa.position or ""
+    for a in assignments:
+        mid = a["member_id"]
+        team = a["team"]
+        record = (
+            db.query(MatchRecord)
+            .filter(MatchRecord.match_id == match_id, MatchRecord.member_id == mid)
+            .first()
+        )
+        if not record:
+            record = MatchRecord(match_id=match_id, member_id=mid, attendance="참석")
+            db.add(record)
+        record.attendance = "참석"
+        record.team = team
+        if result_recorded:
+            if three_team and three_rankings:
+                team_rank = three_rankings.get(team)
+                record.match_result = rank_to_result.get(team_rank, "") if team_rank else ""
+            elif is_draw:
+                record.match_result = "무"
+            elif winning_team and team == winning_team:
+                record.match_result = "승"
+            else:
+                record.match_result = "패"
 
     db.commit()
     db.refresh(match)
-    return {
-        "message": f"{req.team} 포메이션이 저장되었습니다.",
-        "formation": req.formation,
-    }
+    return match
 
 
-@router.put("/{match_id}/set-vote")
-async def set_vote_endpoint(
-    match_id: int,
-    req: SetVoteRequest,
-    db: Session = Depends(get_db),
-    admin: Member = Depends(get_admin_user),
-):
+def update_duties(db: Session, match_id: int, duties: list[dict]) -> Match:
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise ValueError("경기를 찾을 수 없습니다.")
+    if match.status == "확정완료":
+        raise ValueError("확정완료된 경기는 수정할 수 없습니다.")
+    if match.status == "투표중":
+        raise ValueError("먼저 팀 편성을 완료해주세요.")
+
+    for d in duties:
+        record = (
+            db.query(MatchRecord)
+            .filter(MatchRecord.match_id == match_id, MatchRecord.member_id == d["member_id"])
+            .first()
+        )
+        if record:
+            record.duty = d["duty"]
+
+    db.commit()
+    db.refresh(match)
+    return match
+
+
+def update_result_members(
+    db: Session, match_id: int, additions: list[dict], removals: list[int]
+) -> Match:
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise ValueError("경기를 찾을 수 없습니다.")
+    if match.status == "확정완료":
+        raise ValueError("확정완료된 경기는 수정할 수 없습니다.")
+    if match.status != "경기완료":
+        raise ValueError("경기완료 상태에서만 결과 명단을 수정할 수 있습니다.")
+
+    winning_team = _parse_winning_team(match)
+    is_draw = match.result_summary == "무승부"
+    three_team = is_three_team_match(match)
+    three_rankings = _get_three_team_rankings(match) if three_team else None
+    rank_to_result = {1: "승", 2: "무", 3: "패"}
+
+    for mid in removals:
+        record = (
+            db.query(MatchRecord)
+            .filter(MatchRecord.match_id == match_id, MatchRecord.member_id == mid)
+            .first()
+        )
+        if record:
+            record.attendance = "불참"
+            record.team = ""
+            record.match_result = ""
+            record.duty = ""
+
+    for a in additions:
+        mid = a["member_id"]
+        team = a["team"]
+        record = (
+            db.query(MatchRecord)
+            .filter(MatchRecord.match_id == match_id, MatchRecord.member_id == mid)
+            .first()
+        )
+        if not record:
+            record = MatchRecord(match_id=match_id, member_id=mid, attendance="참석")
+            db.add(record)
+        record.attendance = "참석"
+        record.team = team
+        if three_team and three_rankings:
+            team_rank = three_rankings.get(team)
+            record.match_result = rank_to_result.get(team_rank, "") if team_rank else ""
+        elif is_draw:
+            record.match_result = "무"
+        elif winning_team and team == winning_team:
+            record.match_result = "승"
+        else:
+            record.match_result = "패"
+
+    db.commit()
+    db.refresh(match)
+    return match
+
+
+def get_next_sunday_from_date(from_date: date) -> date:
+    """주어진 날짜 이후의 가장 빠른 일요일 반환 (from_date가 일요일이면 다음 일요일)"""
+    # Python weekday: 월=0, 화=1, 수=2, 목=3, 금=4, 토=5, 일=6
+    days_until_sunday = (6 - from_date.weekday()) % 7
+    if days_until_sunday == 0:
+        days_until_sunday = 7  # 오늘이 일요일이면 다음 주 일요일
+    return from_date + timedelta(days=days_until_sunday)
+
+
+def confirm_result(db: Session, match_id: int) -> Match:
     """
-    관리자/시스템관리자가 특정 회원의 투표 상태를 대신 변경 (드래그앤드롭 UI용)
+    결과 확정. 현재 경기일 이후 가장 빠른 일요일 경기 자동 생성.
 
-    - attendance: "참석" / "불참" / "미응답"
-    - "미응답"이면 MatchRecord 삭제 (투표 초기화)
-    - 확정완료된 경기는 변경 불가
-    """
-    try:
-        set_vote_for_member(db, match_id, req.member_id, req.attendance)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"message": f"투표가 '{req.attendance}'(으)로 변경되었습니다."}
-
-
-@router.delete("/{match_id}/votes/reset")
-async def reset_all_votes(
-    match_id: int,
-    db: Session = Depends(get_db),
-    admin: Member = Depends(get_admin_user),
-):
-    """
-    관리자(회장/총무/운영진/시스템관리자)가 특정 경기의 모든 투표 기록을 초기화
-
-    - 모든 회원이 '미응답' 상태로 돌아감
-    - 편성 정보도 초기화 (투표중 상태로 전환)
-    - 확정완료된 경기는 초기화 불가
+    규칙:
+    - 현재 경기가 일요일이면 다음 주 일요일 (+7일)
+    - 현재 경기가 평일이면 그 주의 다음 일요일
+    - 현재 경기일 기준이므로, 관리자가 과거 날짜로 수정 후 확정해도 항상 현재 경기일 이후가 됨
     """
     match = db.query(Match).filter(Match.id == match_id).first()
     if not match:
-        raise HTTPException(status_code=404, detail="경기를 찾을 수 없습니다.")
-    
-    if match.status == "확정완료":
-        raise HTTPException(status_code=400, detail="확정완료된 경기는 초기화할 수 없습니다.")
-    
-    # 모든 MatchRecord 삭제
-    deleted_count = db.query(MatchRecord).filter(
-        MatchRecord.match_id == match_id
-    ).delete()
-    
-    # 경기 상태를 투표중으로 되돌리고 편성 정보도 초기화
-    match.status = "투표중"
-    match.formations = ""
-    
+        raise ValueError("경기를 찾을 수 없습니다.")
+    if match.status != "경기완료":
+        raise ValueError("경기완료 상태에서만 확정할 수 있습니다.")
+
+    match.status = "확정완료"
+
+    # ★ 현재 경기일 이후의 가장 빠른 일요일 계산
+    # Python: weekday() → 월=0, 화=1, ..., 일=6
+    current = match.match_date
+    days_until_sunday = (6 - current.weekday()) % 7
+    if days_until_sunday == 0:
+        # 현재 경기가 일요일 → 다음 주 일요일 (+7일)
+        next_date = current + timedelta(days=7)
+    else:
+        # 평일 경기 → 그 주의 다음 일요일
+        next_date = current + timedelta(days=days_until_sunday)
+
+    existing_next = db.query(Match).filter(Match.match_date == next_date).first()
+    if not existing_next:
+        next_match = Match(match_date=next_date, status="투표중")
+        db.add(next_match)
+
     db.commit()
-    
-    return {
-        "message": f"투표가 모두 초기화되었습니다. ({deleted_count}건 삭제)",
-        "deleted_count": deleted_count,
-    }
+    db.refresh(match)
+    return match
 
 
-# ──────────────────────────────────
-# 수동 알림톡 발송 (테스트용)
-# ──────────────────────────────────
-
-@router.post("/send-vote-notification")
-async def send_vote_notification_manual(
-    db: Session = Depends(get_db),
-    admin: Member = Depends(get_admin_user),
-):
-    """수동으로 투표 알림톡 발송 (관리자 전용, 테스트용)"""
-    from app.services.scheduler import send_vote_notifications
-    await send_vote_notifications()
-    return {"message": "투표 알림톡이 발송되었습니다."}
-
-
-# ══════════════════════════════════════════════
-# ★★★ DB 마이그레이션 (시스템관리자) ★★★
-# ══════════════════════════════════════════════
-
-class MigrateRequest(BaseModel):
-    target_url: str
-    wipe_target: bool = False  # True면 대상 DB의 기존 데이터 모두 삭제 후 이전
-
-
-@router.post("/migrate-to-new-db")
-async def migrate_to_new_db(
-    req: MigrateRequest,
-    db: Session = Depends(get_db),
-    sys_admin: Member = Depends(get_system_admin_user),
-):
+def update_match_date(db: Session, match_id: int, new_date: date) -> Match:
     """
-    현재 DB의 모든 데이터를 다른 PostgreSQL DB로 복사 (시스템관리자 전용)
-
-    - target_url: 대상 DB의 PostgreSQL connection string (예: Neon URL)
-    - wipe_target: True면 대상 DB의 기존 데이터 삭제 후 이전
-    - 현재 DB는 변경되지 않음 (읽기만 함)
-    - 이전 후 Render 대시보드에서 DATABASE_URL을 target_url로 변경해야 함
+    경기 날짜 변경 (관리자 전용)
+    - 과거 날짜 금지 (오늘 포함 가능)
+    - 같은 날짜에 다른 경기 있으면 거부
+    - 확정완료된 경기는 변경 불가
+    - 투표/팀편성/결과 데이터는 모두 유지
     """
-    from sqlalchemy import create_engine, text
-    from sqlalchemy.orm import sessionmaker
-
-    target_url = req.target_url.strip()
-    # postgres:// → postgresql:// (SQLAlchemy 요구사항)
-    if target_url.startswith("postgres://"):
-        target_url = "postgresql://" + target_url[len("postgres://"):]
-    if not target_url.startswith("postgresql://"):
-        raise HTTPException(
-            status_code=400,
-            detail="올바른 PostgreSQL URL이 아닙니다. (postgresql:// 또는 postgres://로 시작해야 함)"
-        )
-
-    # 현재 DB 데이터 모두 읽기
-    members = db.query(Member).all()
-    matches = db.query(Match).all()
-    records = db.query(MatchRecord).all()
-
-    # 모델 객체를 dict로 변환 (세션 분리 후에도 접근 가능하도록)
-    def to_dict(obj):
-        return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
-
-    members_data = [to_dict(m) for m in members]
-    matches_data = [to_dict(m) for m in matches]
-    records_data = [to_dict(r) for r in records]
-
-    # 대상 DB 연결 및 테이블 생성
-    try:
-        target_engine = create_engine(target_url, pool_pre_ping=True)
-        # Member.metadata는 모든 테이블 메타데이터 포함
-        Member.metadata.create_all(bind=target_engine)
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"대상 DB 연결 실패: {str(e)[:200]}"
-        )
-
-    TargetSession = sessionmaker(bind=target_engine, autocommit=False, autoflush=False)
-    target_db = TargetSession()
-
-    try:
-        # 기존 데이터 확인
-        existing_members = target_db.query(Member).count()
-        existing_matches = target_db.query(Match).count()
-        existing_records = target_db.query(MatchRecord).count()
-        existing_total = existing_members + existing_matches + existing_records
-
-        if existing_total > 0:
-            if not req.wipe_target:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"대상 DB에 이미 데이터가 있습니다 (회원 {existing_members}, 경기 {existing_matches}, 기록 {existing_records}). wipe_target=true로 다시 시도하세요."
-                )
-            # 기존 데이터 삭제
-            target_db.query(MatchRecord).delete()
-            target_db.query(Match).delete()
-            target_db.query(Member).delete()
-            target_db.commit()
-
-        # 데이터 복사 (ID 보존)
-        for m in members_data:
-            target_db.add(Member(**m))
-        target_db.commit()
-
-        for m in matches_data:
-            target_db.add(Match(**m))
-        target_db.commit()
-
-        for r in records_data:
-            target_db.add(MatchRecord(**r))
-        target_db.commit()
-
-        # Auto-increment 시퀀스 재설정 (다음 INSERT 시 충돌 방지)
-        for cls in [Member, Match, MatchRecord]:
-            tbl = cls.__tablename__
-            target_db.execute(text(
-                f"SELECT setval(pg_get_serial_sequence('{tbl}', 'id'), "
-                f"COALESCE((SELECT MAX(id) FROM {tbl}), 1), "
-                f"(SELECT MAX(id) FROM {tbl}) IS NOT NULL);"
-            ))
-        target_db.commit()
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        target_db.rollback()
-        raise HTTPException(status_code=500, detail=f"이전 실패: {str(e)[:300]}")
-    finally:
-        target_db.close()
-        target_engine.dispose()
-
-    return {
-        "message": "데이터 이전이 완료되었습니다.",
-        "members": len(members_data),
-        "matches": len(matches_data),
-        "match_records": len(records_data),
-        "next_step": "Render 대시보드에서 DATABASE_URL을 새 URL로 변경하고 저장하세요.",
-    }
-
-
-# ══════════════════════════════════════════════
-# ★★★ 엑셀 과거 경기 기록 일괄 Import (시스템관리자) ★★★
-# ══════════════════════════════════════════════
-
-class ImportMatchItem(BaseModel):
-    date: str  # "2026-01-04" 형식
-    summary: str  # "1팀 승리", "무승부", "[3팀] 1위:1팀 2위:2팀 3위:3팀"
-    records: List[List[str]]  # [["김철수", "승"], ...]
-    num_teams: int = 2  # 2 또는 3 (3이면 3팀 경기)
-
-
-class ImportMatchesRequest(BaseModel):
-    matches: List[ImportMatchItem]
-    skip_existing: bool = True
-
-
-@router.post("/import-history")
-async def import_match_history(
-    req: ImportMatchesRequest,
-    db: Session = Depends(get_db),
-    sys_admin: Member = Depends(get_system_admin_user),
-):
-    """
-    과거 경기 기록 일괄 import (시스템관리자 전용)
-    - 이름으로 회원 매핑, 없는 회원은 건너뜀
-    - num_teams=3이면 3팀 경기로 저장
-    """
-    from datetime import datetime
-
-    members_by_name = {m.name: m.id for m in db.query(Member).all()}
-
-    created_matches = 0
-    skipped_matches = 0
-    total_records = 0
-    skipped_names = set()
-
-    for item in req.matches:
-        try:
-            match_date = datetime.strptime(item.date, "%Y-%m-%d").date()
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"잘못된 날짜 형식: {item.date}")
-
-        existing = db.query(Match).filter(Match.match_date == match_date).first()
-        if existing:
-            if req.skip_existing:
-                skipped_matches += 1
-                continue
-            else:
-                db.query(MatchRecord).filter(MatchRecord.match_id == existing.id).delete(
-                    synchronize_session=False
-                )
-                db.delete(existing)
-                db.commit()
-
-        is_three = item.num_teams == 3
-
-        # result_summary 조정
-        if is_three and not item.summary.startswith(THREE_TEAM_MARKER):
-            summary = f"{THREE_TEAM_MARKER} 1위:1팀 2위:2팀 3위:3팀"
-        else:
-            summary = item.summary
-
-        match = Match(
-            match_date=match_date,
-            status="확정완료",
-            result_summary=summary,
-        )
-        db.add(match)
-        db.commit()
-        db.refresh(match)
-
-        for name, result in item.records:
-            mid = members_by_name.get(name)
-            if mid is None:
-                skipped_names.add(name)
-                continue
-
-            if is_three:
-                # 3팀: 승=1팀, 무=2팀, 패=3팀
-                if result == "승":
-                    team = "1팀"
-                elif result == "무":
-                    team = "2팀"
-                else:
-                    team = "3팀"
-            else:
-                # 2팀
-                if result == "승":
-                    team = "1팀"
-                elif result == "패":
-                    team = "2팀"
-                else:
-                    team = "1팀"
-
-            record = MatchRecord(
-                match_id=match.id,
-                member_id=mid,
-                attendance="참석",
-                team=team,
-                duty="",
-                match_result=result,
-            )
-            db.add(record)
-            total_records += 1
-
-        db.commit()
-        created_matches += 1
-
-    return {
-        "message": "과거 경기 기록 import 완료",
-        "created_matches": created_matches,
-        "skipped_matches": skipped_matches,
-        "total_records": total_records,
-        "skipped_members": sorted(list(skipped_names)),
-    }
-
-
-# ══════════════════════════════════════════════
-# ★★★ 신규: 경기 결과 전체 엑셀 다운로드 (시스템관리자) ★★★
-# ══════════════════════════════════════════════
-
-from fastapi.responses import StreamingResponse
-from io import BytesIO
-from datetime import datetime
-
-
-@router.get("/export/excel")
-async def export_matches_excel(
-    db: Session = Depends(get_db),
-    sys_admin: Member = Depends(get_system_admin_user),
-):
-    """
-    경기 결과 전체 엑셀 다운로드 (시스템관리자 전용)
-
-    - 시트 1: 경기별 요약 (날짜, 상태, 결과, 참석자수)
-    - 시트 2: 개인별 기록 (회원별 참석/결과 매트릭스)
-    """
-    try:
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-        from openpyxl.utils import get_column_letter
-    except ImportError:
-        raise HTTPException(
-            status_code=500,
-            detail="openpyxl 라이브러리가 설치되지 않았습니다.",
-        )
-
-    # 승인된 회원 전체
-    all_members = db.query(Member).filter(Member.status == "승인").order_by(Member.name).all()
-
-    # 모든 경기 (최신순)
-    matches = db.query(Match).order_by(Match.match_date.desc()).all()
-
-    # 모든 MatchRecord를 한 번에 로드
-    all_records = db.query(MatchRecord).all()
-    records_by_match = {}
-    for r in all_records:
-        records_by_match.setdefault(r.match_id, []).append(r)
-
-    wb = openpyxl.Workbook()
-
-    # 스타일 정의
-    header_font = Font(bold=True, color="FFFFFF", size=11)
-    header_fill = PatternFill(start_color="34D399", end_color="34D399", fill_type="solid")
-    header_align = Alignment(horizontal="center", vertical="center")
-    center_align = Alignment(horizontal="center", vertical="center")
-    thin_border = Border(
-        left=Side(style="thin", color="CCCCCC"),
-        right=Side(style="thin", color="CCCCCC"),
-        top=Side(style="thin", color="CCCCCC"),
-        bottom=Side(style="thin", color="CCCCCC"),
-    )
-
-    # ─── 시트 1: 경기별 요약 ───
-    ws1 = wb.active
-    ws1.title = "경기별 요약"
-
-    headers1 = ["번호", "경기일", "요일", "상태", "결과", "참석자수", "불참자수", "참석자 명단"]
-    for col_idx, header in enumerate(headers1, 1):
-        cell = ws1.cell(row=1, column=col_idx, value=header)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = header_align
-        cell.border = thin_border
-
-    days_kr = ["월", "화", "수", "목", "금", "토", "일"]
-    for row_idx, m in enumerate(matches, 2):
-        recs = records_by_match.get(m.id, [])
-        attendees = [r for r in recs if r.attendance == "참석"]
-        absentees = [r for r in recs if r.attendance == "불참"]
-
-        # 참석자 이름 조회
-        member_dict = {mem.id: mem.name for mem in all_members}
-        attendee_names = ", ".join(sorted([member_dict.get(r.member_id, f"삭제됨({r.member_id})") for r in attendees]))
-
-        day_of_week = days_kr[m.match_date.weekday()] if m.match_date else ""
-
-        data = [
-            len(matches) - row_idx + 2,  # 역순 번호 (최신이 1번)
-            m.match_date.strftime("%Y-%m-%d") if m.match_date else "",
-            day_of_week,
-            m.status or "",
-            m.result_summary or "",
-            len(attendees),
-            len(absentees),
-            attendee_names,
-        ]
-        for col_idx, value in enumerate(data, 1):
-            cell = ws1.cell(row=row_idx, column=col_idx, value=value)
-            cell.alignment = Alignment(horizontal="left" if col_idx == 8 else "center", vertical="center", wrap_text=(col_idx == 8))
-            cell.border = thin_border
-
-    # 컬럼 너비
-    widths1 = [6, 14, 6, 10, 22, 10, 10, 80]
-    for col_idx, w in enumerate(widths1, 1):
-        ws1.column_dimensions[get_column_letter(col_idx)].width = w
-    ws1.row_dimensions[1].height = 24
-    ws1.auto_filter.ref = f"A1:{get_column_letter(len(headers1))}1"
-    ws1.freeze_panes = "A2"
-
-    # ─── 시트 2: 개인별 기록 매트릭스 ───
-    ws2 = wb.create_sheet(title="개인별 기록")
-
-    # 경기는 오래된 순으로 정렬 (왼쪽 → 오른쪽)
-    matches_asc = sorted(matches, key=lambda m: m.match_date)
-
-    # 헤더: 이름 | 각 경기 날짜들 | 승 | 무 | 패 | 총참석 | 승점
-    headers2 = ["이름", "생년월일"] + [m.match_date.strftime("%m/%d") for m in matches_asc] + ["승", "무", "패", "총참석", "승점"]
-    for col_idx, header in enumerate(headers2, 1):
-        cell = ws2.cell(row=1, column=col_idx, value=header)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = header_align
-        cell.border = thin_border
-
-    # 데이터: 회원별
-    for row_idx, member in enumerate(all_members, 2):
-        wins = draws = losses = total = points = 0
-        row_data = [member.name, member.birth or ""]
-
-        for m in matches_asc:
-            recs = records_by_match.get(m.id, [])
-            my_rec = next((r for r in recs if r.member_id == member.id and r.attendance == "참석"), None)
-
-            if my_rec and my_rec.match_result:
-                result = my_rec.match_result
-                row_data.append(result)
-                total += 1
-                if result == "승":
-                    wins += 1
-                    points += 3
-                elif result == "무":
-                    draws += 1
-                    points += 1
-                elif result == "패":
-                    losses += 1
-            elif my_rec:
-                # 참석했으나 결과 미입력
-                row_data.append("참석")
-                total += 1
-            else:
-                row_data.append("")
-
-        row_data += [wins, draws, losses, total, points]
-
-        for col_idx, value in enumerate(row_data, 1):
-            cell = ws2.cell(row=row_idx, column=col_idx, value=value)
-            cell.alignment = center_align
-            cell.border = thin_border
-
-            # 결과별 색상
-            if isinstance(value, str) and col_idx > 2 and col_idx < len(headers2) - 4:
-                if value == "승":
-                    cell.fill = PatternFill(start_color="D1FAE5", end_color="D1FAE5", fill_type="solid")
-                elif value == "무":
-                    cell.fill = PatternFill(start_color="FEF3C7", end_color="FEF3C7", fill_type="solid")
-                elif value == "패":
-                    cell.fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
-
-    # 컬럼 너비
-    ws2.column_dimensions["A"].width = 12
-    ws2.column_dimensions["B"].width = 12
-    for col_idx in range(3, 3 + len(matches_asc)):
-        ws2.column_dimensions[get_column_letter(col_idx)].width = 7
-    for col_idx in range(3 + len(matches_asc), len(headers2) + 1):
-        ws2.column_dimensions[get_column_letter(col_idx)].width = 9
-
-    ws2.row_dimensions[1].height = 24
-    ws2.freeze_panes = "C2"
-
-    # ─── 시트 3: 업로드 양식 (경기일자별/회원별 승무패) ───
-    # 업로드된 엑셀과 동일한 포맷: 이름 | M/D\n서울숲 | M/D\n서울숲 | ...
-    ws3 = wb.create_sheet(title="경기일자별 기록")
-
-    # 헤더: 이름 | 각 경기 날짜 (오래된 순)
-    ws3.cell(row=1, column=1, value="이름")
-    for col_idx, m in enumerate(matches_asc, 2):
-        # "M/D\n서울숲" 형식 (월은 앞의 0 제거)
-        date_label = f"{m.match_date.month}/{m.match_date.day}\n서울숲"
-        cell = ws3.cell(row=1, column=col_idx, value=date_label)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = thin_border
-
-    # 첫 번째 헤더 셀 스타일
-    ws3.cell(row=1, column=1).font = header_font
-    ws3.cell(row=1, column=1).fill = header_fill
-    ws3.cell(row=1, column=1).alignment = header_align
-    ws3.cell(row=1, column=1).border = thin_border
-
-    # 데이터: 회원별 (이름 가나다순)
-    members_sorted = sorted(all_members, key=lambda mem: mem.name)
-    for row_idx, member in enumerate(members_sorted, 2):
-        # 이름
-        name_cell = ws3.cell(row=row_idx, column=1, value=member.name)
-        name_cell.alignment = center_align
-        name_cell.border = thin_border
-
-        # 각 경기별 결과
-        for col_idx, m in enumerate(matches_asc, 2):
-            recs = records_by_match.get(m.id, [])
-            my_rec = next((r for r in recs if r.member_id == member.id and r.attendance == "참석"), None)
-
-            value = ""
-            if my_rec and my_rec.match_result:
-                value = my_rec.match_result  # 승/무/패
-            # 참석만 하고 결과 미입력, 불참, 미응답 → 빈칸
-
-            cell = ws3.cell(row=row_idx, column=col_idx, value=value)
-            cell.alignment = center_align
-            cell.border = thin_border
-
-            # 결과별 색상
-            if value == "승":
-                cell.fill = PatternFill(start_color="D1FAE5", end_color="D1FAE5", fill_type="solid")
-            elif value == "무":
-                cell.fill = PatternFill(start_color="FEF3C7", end_color="FEF3C7", fill_type="solid")
-            elif value == "패":
-                cell.fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
-
-    # 컬럼 너비
-    ws3.column_dimensions["A"].width = 12
-    for col_idx in range(2, 2 + len(matches_asc)):
-        ws3.column_dimensions[get_column_letter(col_idx)].width = 11
-
-    # 헤더 행 높이 (줄바꿈 표시용)
-    ws3.row_dimensions[1].height = 36
-    ws3.freeze_panes = "B2"
-
-    # 바이트 스트림으로 저장
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-
-    today = datetime.now().strftime("%Y%m%d")
-    filename = f"FC서울숲_경기기록_{today}.xlsx"
-    from urllib.parse import quote
-    encoded_filename = quote(filename)
-
-    return StreamingResponse(
-        output,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
-        },
-    )
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise ValueError("경기를 찾을 수 없습니다.")
+
+    if match.status == "확정완료":
+        raise ValueError("확정완료된 경기는 날짜를 변경할 수 없습니다. 확정취소 후 다시 시도하세요.")
+
+    today = date.today()
+    if new_date < today:
+        raise ValueError(f"과거 날짜로 변경할 수 없습니다. (오늘: {today.isoformat()})")
+
+    # 같은 날짜에 다른 경기 확인 (자기 자신 제외)
+    conflict = db.query(Match).filter(
+        Match.match_date == new_date,
+        Match.id != match_id,
+    ).first()
+    if conflict:
+        raise ValueError(f"{new_date.isoformat()} 날짜에 이미 다른 경기가 있습니다.")
+
+    match.match_date = new_date
+    db.commit()
+    db.refresh(match)
+    return match
+
+
+def cancel_confirm(db: Session, match_id: int) -> Match:
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise ValueError("경기를 찾을 수 없습니다.")
+    if match.status != "확정완료":
+        raise ValueError("확정완료 상태가 아닙니다.")
+    match.status = "경기완료"
+    db.commit()
+    db.refresh(match)
+    return match
+
+
+def cancel_assignment(db: Session, match_id: int) -> Match:
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise ValueError("경기를 찾을 수 없습니다.")
+    if match.status == "확정완료":
+        raise ValueError("확정완료된 경기는 편성 취소할 수 없습니다. 먼저 확정을 취소하세요.")
+
+    records = db.query(MatchRecord).filter(MatchRecord.match_id == match_id).all()
+    for r in records:
+        r.team = ""
+        r.duty = ""
+        r.match_result = ""
+
+    match.status = "투표중"
+    match.result_summary = None
+    db.commit()
+    db.refresh(match)
+    return match
+
+
+def delete_match(db: Session, match_id: int) -> None:
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        raise ValueError("경기를 찾을 수 없습니다.")
+
+    db.query(MatchRecord).filter(MatchRecord.match_id == match_id).delete(synchronize_session=False)
+    db.delete(match)
+    db.commit()
+
+
+def delete_member_cascade(db: Session, member_id: int) -> str:
+    member = db.query(Member).filter(Member.id == member_id).first()
+    if not member:
+        raise ValueError("회원을 찾을 수 없습니다.")
+
+    if member.phone == "01000000001":
+        raise ValueError("시스템관리자 계정은 삭제할 수 없습니다.")
+
+    name = member.name
+
+    db.query(MatchRecord).filter(MatchRecord.member_id == member_id).delete(synchronize_session=False)
+    db.delete(member)
+    db.commit()
+    return name
